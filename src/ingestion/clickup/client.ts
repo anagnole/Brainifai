@@ -92,12 +92,21 @@ export async function fetchComments(
 /**
  * Fetch status change activity for a task.
  */
+/**
+ * Returns null if the endpoint is not available on this plan (404),
+ * so callers can disable further calls for the rest of the run.
+ */
 export async function fetchTaskActivity(
   client: ClickUpClient,
   taskId: string,
-): Promise<ClickUpTaskActivity[]> {
-  const data = await client.get(`/task/${taskId}/activity`) as { activities: ClickUpTaskActivity[] };
-  return (data.activities ?? []).filter((a) => a.field === 'status');
+): Promise<ClickUpTaskActivity[] | null> {
+  try {
+    const data = await client.get(`/task/${taskId}/activity`) as { activities: ClickUpTaskActivity[] };
+    return (data.activities ?? []).filter((a) => a.field === 'status');
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message.includes('404')) return null;
+    throw err;
+  }
 }
 
 /**
