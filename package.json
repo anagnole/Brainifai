@@ -7,18 +7,21 @@
     "schema": "tsx src/scripts/seed-schema.ts",
     "ingest": "tsx src/ingestion/index.ts",
     "mcp": "tsx src/mcp/index.ts",
-    "mcp-fal": "tsx src/mcp-fal/index.ts"
+    "mcp-fal": "tsx src/mcp-fal/index.ts",
+    "api": "tsx --env-file=.env src/api/index.ts"
   },
   "dependencies": {
     "@fal-ai/client": "^1.9.3",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "@octokit/rest": "^22.0.1",
     "@slack/web-api": "^7.14.0",
+    "express": "^5.2.1",
     "neo4j-driver": "^5.27.0",
     "pino": "^9.6.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
