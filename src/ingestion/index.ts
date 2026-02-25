@@ -11,6 +11,9 @@ import type { NormalizedMessage } from '../shared/types.js';
 import { getGitHubConfig } from './github/config.js';
 import { getGitHubClient, verifyAuth as verifyGitHubAuth, fetchPRs, fetchPRComments, fetchPRReviews } from './github/client.js';
 import { normalizeGitHubPR, normalizeGitHubComment, normalizeGitHubReview } from './github/normalize.js';
+import { getClickUpConfig } from './clickup/config.js';
+import { getClickUpClient, verifyAuth as verifyClickUpAuth, getListInfo, fetchTasks, fetchComments, fetchTaskActivity, fetchDocs } from './clickup/client.js';
+import { normalizeClickUpTask, normalizeClickUpComment, normalizeClickUpStatusChange, normalizeClickUpDoc } from './clickup/normalize.js';
 
 async function ingestSlack() {
   const config = getSlackConfig();
@@ -141,6 +144,107 @@ async function ingestGitHub() {
   }
 }
 
+async function ingestClickUp() {
+  const config = getClickUpConfig();
+  const client = getClickUpClient(config.token);
+
+  const { workspaceId } = await verifyClickUpAuth(client);
+
+  const backfillSince = new Date(
+    Date.now() - config.backfillDays * 86400 * 1000,
+  ).toISOString();
+
+  // --- Tasks & Comments (per list) ---
+  for (const listId of config.listIds) {
+    const listInfo = await getListInfo(client, listId);
+    logger.info({ list: listInfo.name, id: listId }, 'Processing ClickUp list');
+
+    const taskCursorKey = `${listId}:tasks`;
+    const taskSince = (await getCursor('clickup', taskCursorKey)) ?? backfillSince;
+    let taskCount = 0;
+    let commentCount = 0;
+    let latestTaskTs = taskSince;
+
+    for await (const page of fetchTasks(client, listId, taskSince)) {
+      const normalized: NormalizedMessage[] = [];
+
+      for (const task of page) {
+        const item = normalizeClickUpTask(task, listId, listInfo.name, config.topicAllowlist);
+        if (item) {
+          normalized.push(item);
+          if (task.date_updated > latestTaskTs) latestTaskTs = task.date_updated;
+        }
+
+        // Fetch comments for each task
+        const comments = await fetchComments(client, task.id);
+        for (const comment of comments) {
+          const commentItem = normalizeClickUpComment(comment, listId, listInfo.name, config.topicAllowlist);
+          if (commentItem) {
+            normalized.push(commentItem);
+            commentCount++;
+          }
+        }
+
+        // Fetch status change history for each task
+        const activities = await fetchTaskActivity(client, task.id);
+        for (const activity of activities) {
+          const statusItem = normalizeClickUpStatusChange(activity, task, listId, listInfo.name);
+          if (statusItem) normalized.push(statusItem);
+        }
+      }
+
+      for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
+        await upsertBatch(normalized.slice(i, i + UPSERT_BATCH_SIZE));
+      }
+
+      taskCount += page.length;
+    }
+
+    if (latestTaskTs !== taskSince) {
+      await setCursor('clickup', taskCursorKey, latestTaskTs);
+    }
+
+    console.log(`ClickUp ${listInfo.name}: ingested ${taskCount} tasks, ${commentCount} comments`);
+  }
+
+  // --- Docs (per workspace) ---
+  try {
+    const docCursorKey = `${workspaceId}:docs`;
+    const docSince = (await getCursor('clickup', docCursorKey)) ?? backfillSince;
+    let docCount = 0;
+    let latestDocTs = docSince;
+
+    for await (const page of fetchDocs(client, workspaceId)) {
+      const normalized: NormalizedMessage[] = [];
+
+      for (const doc of page) {
+        const docTs = new Date(Number(doc.date_updated)).toISOString();
+        if (docTs <= docSince) continue;
+
+        const item = normalizeClickUpDoc(doc, workspaceId, config.topicAllowlist);
+        if (item) {
+          normalized.push(item);
+          if (docTs > latestDocTs) latestDocTs = docTs;
+          docCount++;
+        }
+      }
+
+      for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
+        await upsertBatch(normalized.slice(i, i + UPSERT_BATCH_SIZE));
+      }
+    }
+
+    if (latestDocTs !== docSince) {
+      await setCursor('clickup', docCursorKey, latestDocTs);
+    }
+
+    console.log(`ClickUp workspace: ingested ${docCount} docs`);
+  } catch (err) {
+    logger.warn({ err }, 'ClickUp Docs API unavailable — skipping docs ingestion');
+    console.log('ClickUp workspace: docs skipped (API not available on this plan)');
+  }
+}
+
 async function main() {
   await seedSchema();
 
@@ -156,6 +260,13 @@ async function main() {
     await ingestGitHub();
   } else {
     logger.info('GITHUB_TOKEN not set — skipping GitHub ingestion');
+  }
+
+  // ClickUp ingestion (skip if not configured)
+  if (process.env.CLICKUP_TOKEN) {
+    await ingestClickUp();
+  } else {
+    logger.info('CLICKUP_TOKEN not set — skipping ClickUp ingestion');
   }
 
   await closeDriver();
