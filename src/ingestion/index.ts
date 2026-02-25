@@ -14,6 +14,9 @@ import { normalizeGitHubPR, normalizeGitHubComment, normalizeGitHubReview } from
 import { getClickUpConfig } from './clickup/config.js';
 import { getClickUpClient, verifyAuth as verifyClickUpAuth, getListInfo, fetchTasks, fetchComments, fetchTaskActivity, fetchDocs } from './clickup/client.js';
 import { normalizeClickUpTask, normalizeClickUpComment, normalizeClickUpStatusChange, normalizeClickUpDoc } from './clickup/normalize.js';
+import { getAppleCalendarConfig } from './apple-calendar/config.js';
+import { fetchCalendarEvents } from './apple-calendar/client.js';
+import { normalizeCalendarEvent } from './apple-calendar/normalize.js';
 
 async function ingestSlack() {
   const config = getSlackConfig();
@@ -164,6 +167,7 @@ async function ingestClickUp() {
     let taskCount = 0;
     let commentCount = 0;
     let latestTaskTs = taskSince;
+    let activitySupported = true; // probe once; disable for rest of run if 404
 
     for await (const page of fetchTasks(client, listId, taskSince)) {
       const normalized: NormalizedMessage[] = [];
@@ -185,11 +189,17 @@ async function ingestClickUp() {
           }
         }
 
-        // Fetch status change history for each task
-        const activities = await fetchTaskActivity(client, task.id);
-        for (const activity of activities) {
-          const statusItem = normalizeClickUpStatusChange(activity, task, listId, listInfo.name);
-          if (statusItem) normalized.push(statusItem);
+        // Fetch status change history — skip if endpoint not available on this plan
+        if (activitySupported) {
+          const activities = await fetchTaskActivity(client, task.id);
+          if (activities === null) {
+            activitySupported = false;
+          } else {
+            for (const activity of activities) {
+              const statusItem = normalizeClickUpStatusChange(activity, task, listId, listInfo.name);
+              if (statusItem) normalized.push(statusItem);
+            }
+          }
         }
       }
 
@@ -245,6 +255,31 @@ async function ingestClickUp() {
   }
 }
 
+async function ingestAppleCalendar() {
+  const config = getAppleCalendarConfig();
+  const backfillSince = new Date(
+    Date.now() - config.backfillDays * 86400 * 1000,
+  ).toISOString();
+
+  const cursorKey = `${config.username}:calendars`;
+  const since = (await getCursor('apple-calendar', cursorKey)) ?? backfillSince;
+
+  const events = await fetchCalendarEvents(config.username, config.password, since, config.calendarFilter);
+
+  const normalized: NormalizedMessage[] = [];
+  for (const event of events) {
+    const item = normalizeCalendarEvent(event, config.username, config.topicAllowlist);
+    if (item) normalized.push(item);
+  }
+
+  for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
+    await upsertBatch(normalized.slice(i, i + UPSERT_BATCH_SIZE));
+  }
+
+  await setCursor('apple-calendar', cursorKey, new Date().toISOString());
+  console.log(`Apple Calendar: ingested ${normalized.length} events`);
+}
+
 async function main() {
   await seedSchema();
 
@@ -267,6 +302,13 @@ async function main() {
     await ingestClickUp();
   } else {
     logger.info('CLICKUP_TOKEN not set — skipping ClickUp ingestion');
+  }
+
+  // Apple Calendar ingestion (skip if not configured)
+  if (process.env.APPLE_CALDAV_USERNAME) {
+    await ingestAppleCalendar();
+  } else {
+    logger.info('APPLE_CALDAV_USERNAME not set — skipping Apple Calendar ingestion');
   }
 
   await closeDriver();

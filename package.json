@@ -3,11 +3,11 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test-connection": "tsx src/scripts/test-connection.ts",
-    "schema": "tsx src/scripts/seed-schema.ts",
-    "ingest": "tsx src/ingestion/index.ts",
-    "mcp": "tsx src/mcp/index.ts",
-    "mcp-fal": "tsx src/mcp-fal/index.ts"
+    "test-connection": "tsx --env-file=.env src/scripts/test-connection.ts",
+    "schema": "tsx --env-file=.env src/scripts/seed-schema.ts",
+    "ingest": "tsx --env-file=.env src/ingestion/index.ts",
+    "mcp": "tsx --env-file=.env src/mcp/index.ts",
+    "mcp-fal": "tsx --env-file=.env src/mcp-fal/index.ts"
   },
   "dependencies": {
     "@fal-ai/client": "^1.9.3",
@@ -16,6 +16,7 @@
     "@slack/web-api": "^7.14.0",
     "neo4j-driver": "^5.27.0",
     "pino": "^9.6.0",
+    "tsdav": "^2.1.8",
     "zod": "^3.24.0"
   },
   "devDependencies": {
