@@ -9,6 +9,11 @@
       "command": "npx",
       "args": ["tsx", "--env-file=.env", "src/mcp-fal/index.ts"],
       "cwd": "/Users/anagnole/Projects/Brainifai"
+    },
+    "clickup": {
+      "command": "npx",
+      "args": ["tsx", "--env-file=.env", "src/mcp-clickup/index.ts"],
+      "cwd": "/Users/anagnole/Projects/Brainifai"
     }
   }
 }
