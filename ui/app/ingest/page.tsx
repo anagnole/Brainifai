@@ -2,6 +2,15 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 
+interface SchedulerState {
+  enabled: boolean
+  running: boolean
+  lastRun: string | null
+  lastStatus: 'success' | 'error' | null
+  nextRun: string | null
+  intervalMinutes: number
+}
+
 type Status = 'idle' | 'running' | 'done' | 'error'
 
 interface LogLine {
@@ -67,12 +76,53 @@ function StatusBadge({ status }: { status: Status }) {
   )
 }
 
+function relativeTime(ts: string | null): string {
+  if (!ts) return 'never'
+  const diff = Date.now() - new Date(ts).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  return `${Math.floor(mins / 60)}h ago`
+}
+
+function futureTime(ts: string | null): string {
+  if (!ts) return '—'
+  const diff = new Date(ts).getTime() - Date.now()
+  const mins = Math.ceil(diff / 60000)
+  if (mins <= 0) return 'soon'
+  if (mins < 60) return `in ${mins}m`
+  return `in ${Math.floor(mins / 60)}h ${mins % 60}m`
+}
+
 export default function IngestPage() {
   const [status, setStatus] = useState<Status>('idle')
   const [lines, setLines] = useState<LogLine[]>([])
   const [finalMsg, setFinalMsg] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [scheduler, setScheduler] = useState<SchedulerState | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
   const esRef = useRef<EventSource | null>(null)
+
+  // Poll scheduler state every 15s
+  useEffect(() => {
+    const fetchScheduler = async () => {
+      try {
+        const res = await fetch('/api/scheduler')
+        if (res.ok) setScheduler(await res.json())
+      } catch { /* ignore */ }
+    }
+    fetchScheduler()
+    const interval = setInterval(fetchScheduler, 15000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const toggleScheduler = async () => {
+    const res = await fetch('/api/scheduler', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'toggle' }),
+    })
+    if (res.ok) setScheduler(await res.json())
+  }
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -149,6 +199,41 @@ export default function IngestPage() {
         <h1 className="text-2xl font-bold text-zinc-100">Ingest</h1>
         <p className="text-zinc-400 mt-1">Fetch new data from all configured sources</p>
       </div>
+
+      {/* Scheduler card */}
+      {scheduler && (
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${scheduler.enabled ? 'bg-green-400 animate-pulse' : 'bg-zinc-600'}`} />
+            <div>
+              <p className="text-sm font-medium text-zinc-200">
+                Auto-ingest every {scheduler.intervalMinutes} minutes
+              </p>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                Last run: <span className="text-zinc-400">{relativeTime(scheduler.lastRun)}</span>
+                {scheduler.lastStatus && (
+                  <span className={`ml-1 ${scheduler.lastStatus === 'success' ? 'text-green-400' : 'text-red-400'}`}>
+                    ({scheduler.lastStatus})
+                  </span>
+                )}
+                {scheduler.enabled && scheduler.nextRun && (
+                  <> · Next: <span className="text-zinc-400">{futureTime(scheduler.nextRun)}</span></>
+                )}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={toggleScheduler}
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors flex-shrink-0 ${
+              scheduler.enabled
+                ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-200'
+                : 'bg-indigo-500 hover:bg-indigo-600 text-white'
+            }`}
+          >
+            {scheduler.enabled ? 'Pause' : 'Enable'}
+          </button>
+        </div>
+      )}
 
       {/* Controls */}
       <div className="flex items-center gap-4">
