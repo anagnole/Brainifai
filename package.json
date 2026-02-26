@@ -7,7 +7,8 @@
     "schema": "tsx --env-file=.env src/scripts/seed-schema.ts",
     "ingest": "tsx --env-file=.env src/ingestion/index.ts",
     "mcp": "tsx --env-file=.env src/mcp/index.ts",
-    "mcp-fal": "tsx --env-file=.env src/mcp-fal/index.ts"
+    "mcp-fal": "tsx --env-file=.env src/mcp-fal/index.ts",
+    "ui": "npm --prefix ui run dev"
   },
   "dependencies": {
     "@fal-ai/client": "^1.9.3",
