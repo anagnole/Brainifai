@@ -2,7 +2,7 @@
 
 A Personal Knowledge Graph (PKG) that grows automatically from your daily tools and lets you query it through Claude.
 
-Data flows in from Slack, GitHub, ClickUp, and Apple Calendar, lands in a local Neo4j graph, and is exposed to Claude via an MCP server. Ask natural-language questions and get grounded context from your actual activity — people, topics, conversations, tasks, pull requests, calendar events.
+Data flows in from Slack, GitHub, ClickUp, and Apple Calendar, lands in a local Neo4j graph, and is exposed to Claude via MCP servers. Ask natural-language questions and get grounded context from your actual activity — people, topics, conversations, tasks, pull requests, calendar events. Manage tasks directly from Claude. Browse and configure everything through a local web UI.
 
 ---
 
@@ -23,8 +23,10 @@ Ingestion pipeline
    ↓  cursor per source/channel/list (only fetches new data next run)
 Neo4j (Docker, local)
    ↑  Cypher: fulltext search, time windows, graph traversal
-MCP Server (stdio)
-   ↑  4 curated tools — no raw Cypher exposed to Claude
+MCP Servers (stdio)
+   ↑  brainifai   — 4 query tools (read-only, context retrieval)
+   ↑  clickup     — 6 task management tools (create, update, comment)
+   ↑  fal-images  — image generation via fal.ai
 Claude (Desktop or Claude Code)
 ```
 
@@ -51,6 +53,8 @@ All sources are optional — each is skipped if its credentials are not set in `
 
 ### MCP tools
 
+**brainifai** — context retrieval (read-only)
+
 | Tool | What it does |
 |------|-------------|
 | `get_context_packet` | **Primary tool.** Given a query, finds matching entities, gathers structural facts, pulls time-windowed evidence. Returns a bounded JSON payload. |
@@ -60,13 +64,43 @@ All sources are optional — each is skipped if its credentials are not set in `
 
 Safety limits are always enforced: max 20 evidence items, max 8,000 chars total, 10s query timeout.
 
+**clickup** — task management (read + write)
+
+| Tool | What it does |
+|------|-------------|
+| `get_lists` | Lists configured ClickUp lists with names and available statuses. |
+| `list_tasks` | Lists tasks in a list, with optional status filter. |
+| `get_task` | Gets full task detail by ID (description, assignees, etc.). |
+| `create_task` | Creates a new task (name, description, status, priority, due date, assignees). |
+| `update_task` | Updates any field on an existing task. |
+| `add_comment` | Adds a comment to a task. |
+
 ### Topic extraction
 
-Topics are extracted from every activity two ways:
+Topics are extracted from every activity:
 1. **Hashtags** — `#deploy`, `#incident`, etc.
 2. **GitHub labels** — label names are automatically added as topics.
 3. **Allowlist matching** — configurable list of keywords (case-insensitive), set via `TOPIC_ALLOWLIST`.
 4. **Task status** — ClickUp task statuses (e.g. `in-progress`, `done`) are stored as topics automatically.
+
+---
+
+## Admin UI
+
+A local web interface for configuring sources, running ingestion, and browsing the knowledge graph.
+
+```bash
+npm run ui     # starts at http://localhost:3000
+```
+
+| Page | What it does |
+|------|-------------|
+| **Dashboard** | Entity counts, source status, last ingestion timestamps per source. |
+| **Sources** | Credential forms for all sources — saves directly to `.env`. Lists available Apple Calendars. |
+| **Ingest** | Manual ingestion trigger with live log streaming. Auto-ingest scheduler (configurable interval, on/off toggle). |
+| **Explore** | Browse all entities, search by name, filter by type. Click any entity to see its recent activity feed. |
+
+The scheduler runs inside the UI server process — enabling it means ingestion runs automatically on a timer as long as the UI is open.
 
 ---
 
@@ -83,6 +117,7 @@ Topics are extracted from every activity two ways:
 git clone <repo-url>
 cd Brainifai
 npm install
+cd ui && npm install && cd ..
 ```
 
 ### 2. Configure environment
@@ -148,22 +183,18 @@ Ingests: tasks (name + description), comments, docs, and **full status change hi
 
 Connects via CalDAV to iCloud. Fetches events from `BACKFILL_DAYS` ago through 30 days into the future.
 
+To list available calendar names before configuring:
+```bash
+npm run list-calendars
+```
+
 ### 5. Run ingestion
 
 ```bash
 npm run ingest
 ```
 
-Output looks like:
-```
-Slack #general: ingested 142 messages
-GitHub anagnole/myrepo: ingested 12 PRs, 34 comments
-ClickUp My List: ingested 28 tasks, 56 comments
-Apple Calendar: ingested 43 events
-Ingestion complete
-```
-
-Re-run anytime — only new data is fetched.
+Re-run anytime — only new data is fetched. Or use the **Ingest** page in the admin UI to trigger and watch live logs, and enable the auto-scheduler.
 
 ---
 
@@ -171,13 +202,21 @@ Re-run anytime — only new data is fetched.
 
 ### Claude Code (recommended)
 
-Add to `~/.claude.json` so it's available in every project:
+Add to `~/.claude.json` so the MCP servers are available in every project:
 
 ```bash
+# Knowledge graph (read-only context retrieval)
 claude mcp add brainifai --scope user -- npx tsx \
   --env-file=/absolute/path/to/Brainifai/.env \
   /absolute/path/to/Brainifai/src/mcp/index.ts
+
+# ClickUp task management
+claude mcp add clickup --scope user -- npx tsx \
+  --env-file=/absolute/path/to/Brainifai/.env \
+  /absolute/path/to/Brainifai/src/mcp-clickup/index.ts
 ```
+
+Or use the project-local `.mcp.json` (already configured) — servers are available automatically when working in this repo.
 
 ### Claude Desktop
 
@@ -189,6 +228,11 @@ Configure in `~/Library/Application Support/Claude/claude_desktop_config.json`:
     "brainifai": {
       "command": "npx",
       "args": ["tsx", "--env-file=.env", "src/mcp/index.ts"],
+      "cwd": "/absolute/path/to/Brainifai"
+    },
+    "clickup": {
+      "command": "npx",
+      "args": ["tsx", "--env-file=.env", "src/mcp-clickup/index.ts"],
       "cwd": "/absolute/path/to/Brainifai"
     }
   }
@@ -202,6 +246,7 @@ Configure in `~/Library/Application Support/Claude/claude_desktop_config.json`:
 > *"What PRs have been merged in myrepo recently?"*
 > *"Which ClickUp tasks moved to done this week?"*
 > *"What meetings do I have coming up that mention the API migration?"*
+> *"Create a ClickUp task called 'Fix login bug' in the Phase 1 list, high priority"*
 > *"Get a context packet for the incident we had last Friday"*
 
 ---
@@ -216,7 +261,13 @@ docker compose down -v      # Stop + wipe all data (triggers fresh backfill on n
 npm run test-connection     # Verify Neo4j connectivity
 npm run schema              # Create/update constraints and indexes
 npm run ingest              # Fetch new data from all configured sources
-npm run mcp                 # Start MCP server
+npm run list-calendars      # List available Apple Calendar names
+
+npm run mcp                 # Start knowledge graph MCP server (stdio)
+npm run mcp-clickup         # Start ClickUp task management MCP server (stdio)
+npm run mcp-fal             # Start fal.ai image generation MCP server (stdio)
+
+npm run ui                  # Start admin UI at http://localhost:3000
 
 npx tsc --noEmit            # Type check
 ```
@@ -229,7 +280,7 @@ npx tsc --noEmit            # Type check
 src/
   shared/                 Neo4j driver, canonical types, schema, constants
   ingestion/
-    slack/                Slack connector (client, config, normalize, types)
+    slack/                Slack connector (messages, threads)
     github/               GitHub connector (PRs, comments, reviews)
     clickup/              ClickUp connector (tasks, comments, docs, status changes)
     apple-calendar/       Apple Calendar connector (CalDAV/iCloud)
@@ -237,10 +288,22 @@ src/
     upsert.ts             Source-agnostic MERGE-based upsert
     cursor.ts             Incremental ingestion state
     index.ts              Ingestion entry point
-  mcp/                    MCP server, 4 tools, Cypher queries, safety limits
+  mcp/                    Knowledge graph MCP server (4 read-only tools)
+  mcp-clickup/            ClickUp task management MCP server (6 tools)
+    client.ts             ClickUp REST API client
+    tools/                get-lists, list-tasks, get-task, create-task, update-task, add-comment
+    server.ts             MCP server assembly
+    index.ts              stdio entry point
   mcp-fal/                fal.ai image generation MCP server
-  scripts/                One-off utilities (test-connection, seed-schema)
+  scripts/                One-off utilities (test-connection, seed-schema, list-calendars)
+ui/
+  app/                    Next.js App Router pages (dashboard, sources, ingest, explore)
+  app/api/                API routes (config, ingest SSE, entities, activity, scheduler, calendars)
+  components/             Nav sidebar
+  lib/                    Neo4j driver, env reader/writer, scheduler
+  instrumentation.ts      Starts scheduler on server boot
 docker-compose.yml
+.mcp.json                 Project-local MCP server config (brainifai, clickup, fal-images)
 .env.example
 ```
 

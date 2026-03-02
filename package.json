@@ -9,7 +9,12 @@
     "mcp": "tsx --env-file=.env src/mcp/index.ts",
     "mcp-fal": "tsx --env-file=.env src/mcp-fal/index.ts",
     "mcp-clickup": "tsx --env-file=.env src/mcp-clickup/index.ts",
-    "ui": "npm --prefix ui run dev"
+    "mcp-figma": "npm --prefix ../figma-writer-mcp start",
+    "ui": "npm --prefix ui run dev",
+    "launch": "bash scripts/launchagent.sh install",
+    "launch:stop": "bash scripts/launchagent.sh uninstall",
+    "launch:status": "bash scripts/launchagent.sh status",
+    "launch:logs": "tail -f logs/brainifai.log"
   },
   "dependencies": {
     "@fal-ai/client": "^1.9.3",
