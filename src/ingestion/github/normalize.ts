@@ -1,5 +1,5 @@
 import { MAX_SNIPPET_CHARS } from '../../shared/constants.js';
-import { extractTopics } from '../topic-extractor.js';
+import { extractAnnotations } from '../topic-extractor.js';
 import type { NormalizedMessage } from '../../shared/types.js';
 import type { GitHubPR, GitHubComment, GitHubReview } from './types.js';
 
@@ -31,8 +31,12 @@ export function normalizeGitHubPR(
 
   // Extract topics from body + labels
   const labelTopics = pr.labels.map((l) => l.name.toLowerCase());
-  const textTopics = extractTopics(text, allowlist);
-  const topics = [...new Set([...labelTopics, ...textTopics])].map((name) => ({ name }));
+  const annotations = extractAnnotations(text, allowlist);
+  const topics = [...new Set([...labelTopics, ...annotations.topics])].map((name) => ({ name }));
+
+  // Convert GitHub @mentions to person keys
+  const ghMentions = extractGitHubMentions(text);
+  const mentions = ghMentions.map((login) => `github:${login}`);
 
   return {
     activity: {
@@ -57,6 +61,8 @@ export function normalizeGitHubPR(
       linked_person_key: personKey,
     },
     topics,
+    mentions: mentions.length > 0 ? mentions : undefined,
+    urls: annotations.urls.length > 0 ? annotations.urls : undefined,
   };
 }
 
@@ -69,7 +75,17 @@ export function normalizeGitHubComment(
 
   const snippet = truncate(comment.body ?? '');
   const personKey = `github:${comment.user.login}`;
-  const topics = extractTopics(comment.body ?? '', allowlist).map((name) => ({ name }));
+  const annotations = extractAnnotations(comment.body ?? '', allowlist);
+  const topics = annotations.topics.map((name) => ({ name }));
+
+  // PR comment parent: derive PR source_id from the pull_request_url
+  const prNumber = extractPrNumberFromUrl(comment.pull_request_url);
+  const parentSourceId = prNumber
+    ? `github:${repoFullName}:pr:${prNumber}`
+    : undefined;
+
+  const ghMentions = extractGitHubMentions(comment.body ?? '');
+  const mentions = ghMentions.map((login) => `github:${login}`);
 
   return {
     activity: {
@@ -79,6 +95,7 @@ export function normalizeGitHubComment(
       kind: 'pr_comment',
       snippet,
       url: comment.html_url,
+      parent_source_id: parentSourceId,
     },
     person: {
       person_key: personKey,
@@ -94,6 +111,8 @@ export function normalizeGitHubComment(
       linked_person_key: personKey,
     },
     topics,
+    mentions: mentions.length > 0 ? mentions : undefined,
+    urls: annotations.urls.length > 0 ? annotations.urls : undefined,
   };
 }
 
@@ -112,7 +131,11 @@ export function normalizeGitHubReview(
   const text = `[${review.state}] ${body}`.trim();
   const snippet = truncate(text);
   const personKey = `github:${review.user.login}`;
-  const topics = extractTopics(body, allowlist).map((name) => ({ name }));
+  const annotations = extractAnnotations(body, allowlist);
+  const topics = annotations.topics.map((name) => ({ name }));
+
+  const ghMentions = extractGitHubMentions(body);
+  const mentions = ghMentions.map((login) => `github:${login}`);
 
   return {
     activity: {
@@ -122,6 +145,7 @@ export function normalizeGitHubReview(
       kind: 'pr_review',
       snippet,
       url: review.html_url,
+      parent_source_id: `github:${repoFullName}:pr:${prNumber}`,
     },
     person: {
       person_key: personKey,
@@ -137,5 +161,24 @@ export function normalizeGitHubReview(
       linked_person_key: personKey,
     },
     topics,
+    mentions: mentions.length > 0 ? mentions : undefined,
+    urls: annotations.urls.length > 0 ? annotations.urls : undefined,
   };
+}
+
+/** Extract GitHub @mentions (e.g. `@username`) from text. */
+function extractGitHubMentions(text: string): string[] {
+  const re = /(?:^|\s)@([a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38})/g;
+  const mentions = new Set<string>();
+  for (const match of text.matchAll(re)) {
+    mentions.add(match[1]);
+  }
+  return [...mentions];
+}
+
+/** Extract PR number from a GitHub API pull_request_url. */
+function extractPrNumberFromUrl(url?: string): number | null {
+  if (!url) return null;
+  const match = url.match(/\/pulls?\/(\d+)/);
+  return match ? Number(match[1]) : null;
 }

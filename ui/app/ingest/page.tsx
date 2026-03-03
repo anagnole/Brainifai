@@ -71,6 +71,7 @@ export default function IngestPage() {
   const [status, setStatus] = useState<Status>('idle')
   const [lines, setLines] = useState<LogLine[]>([])
   const [finalMsg, setFinalMsg] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [backfillDays, setBackfillDays] = useState('')
   const logRef = useRef<HTMLDivElement>(null)
   const esRef = useRef<EventSource | null>(null)
 
@@ -87,7 +88,12 @@ export default function IngestPage() {
     setStatus('running')
 
     try {
-      const res = await fetch('/api/ingest', { method: 'POST' })
+      const body = backfillDays ? { backfillDays: parseInt(backfillDays, 10) } : undefined
+      const res = await fetch('/api/ingest', {
+        method: 'POST',
+        headers: body ? { 'Content-Type': 'application/json' } : {},
+        body: body ? JSON.stringify(body) : undefined,
+      })
       if (!res.ok) {
         const data = await res.json()
         setFinalMsg({ type: 'error', msg: data.error || 'Failed to start ingestion' })
@@ -162,6 +168,22 @@ export default function IngestPage() {
           </svg>
           Start Ingestion
         </button>
+        <div className="flex items-center gap-2">
+          <label htmlFor="backfill-days" className="text-sm text-zinc-400 whitespace-nowrap">
+            Backfill days
+          </label>
+          <input
+            id="backfill-days"
+            type="number"
+            min="1"
+            max="365"
+            value={backfillDays}
+            onChange={(e) => setBackfillDays(e.target.value)}
+            placeholder="7"
+            disabled={status === 'running'}
+            className="w-20 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-zinc-100 text-sm placeholder-zinc-600 focus:outline-none focus:border-indigo-500 disabled:opacity-40"
+          />
+        </div>
         <StatusBadge status={status} />
       </div>
 

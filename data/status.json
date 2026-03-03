@@ -1,0 +1,32 @@
+{
+  "lastRun": "2026-03-03T18:42:05.776Z",
+  "lastStatus": "success",
+  "counts": {
+    "people": 10,
+    "topics": 10,
+    "containers": 7,
+    "activities": 151
+  },
+  "cursors": [
+    {
+      "source": "apple-calendar",
+      "container_id": "anagnole@outlook.com.gr:calendars",
+      "ts": "2026-03-03T18:41:26.832Z"
+    },
+    {
+      "source": "github",
+      "container_id": "anagnole/Brainifai:prs",
+      "ts": "2026-02-26T22:05:58Z"
+    },
+    {
+      "source": "slack",
+      "container_id": "C0AGNPWR6SF",
+      "ts": "1771963438.463679"
+    },
+    {
+      "source": "slack",
+      "container_id": "C0A2391E6R5",
+      "ts": "1771962443.580629"
+    }
+  ]
+}

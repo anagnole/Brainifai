@@ -26,4 +26,7 @@ export const NEO4J_INDEXES = [
 
   `CREATE FULLTEXT INDEX entity_search IF NOT EXISTS
    FOR (n:Person|Topic|Container) ON EACH [n.display_name, n.name]`,
+
+  `CREATE FULLTEXT INDEX activity_search IF NOT EXISTS
+   FOR (a:Activity) ON EACH [a.snippet]`,
 ];

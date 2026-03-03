@@ -1,7 +1,7 @@
 import { MAX_SNIPPET_CHARS } from '../shared/constants.js';
 import type { NormalizedMessage } from '../shared/types.js';
 import type { SlackMessage, SlackChannel } from './slack/types.js';
-import { extractTopics } from './topic-extractor.js';
+import { extractAnnotations } from './topic-extractor.js';
 
 /**
  * Transform a raw Slack message + channel info into our canonical model.
@@ -29,6 +29,17 @@ export function normalizeSlackMessage(
   const sourceId = `slack:${channel.id}:${msg.ts}`;
   const personKey = `slack:${msg.user}`;
 
+  // Determine parent_source_id for thread replies
+  const parentSourceId =
+    msg.thread_ts && msg.thread_ts !== msg.ts
+      ? `slack:${channel.id}:${msg.thread_ts}`
+      : undefined;
+
+  const annotations = extractAnnotations(text, allowlist);
+
+  // Convert Slack mention user IDs to person keys
+  const mentions = annotations.mentionedUserIds.map((uid) => `slack:${uid}`);
+
   return {
     activity: {
       source: 'slack',
@@ -38,6 +49,7 @@ export function normalizeSlackMessage(
       snippet,
       url: permalink,
       thread_ts: msg.thread_ts,
+      parent_source_id: parentSourceId,
     },
     person: {
       person_key: personKey,
@@ -56,6 +68,8 @@ export function normalizeSlackMessage(
       account_id: msg.user,
       linked_person_key: personKey,
     },
-    topics: extractTopics(text, allowlist).map((name) => ({ name })),
+    topics: annotations.topics.map((name) => ({ name })),
+    mentions: mentions.length > 0 ? mentions : undefined,
+    urls: annotations.urls.length > 0 ? annotations.urls : undefined,
   };
 }

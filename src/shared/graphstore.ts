@@ -23,12 +23,14 @@ export async function getGraphStore(): Promise<GraphStore> {
       },
     });
   } else if (backend === 'kuzu') {
-    const readOnly = process.env.GRAPHSTORE_READONLY === 'true';
+    const onDemand = process.env.GRAPHSTORE_ON_DEMAND === 'true';
+    const readOnly = onDemand || process.env.GRAPHSTORE_READONLY === 'true';
     store = await createGraphStore({
       backend: 'kuzu',
       kuzu: {
         dbPath: process.env.KUZU_DB_PATH ?? './data/kuzu',
         readOnly,
+        onDemand,
       },
     });
   } else {
