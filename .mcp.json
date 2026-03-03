@@ -5,7 +5,7 @@
       "args": ["tsx", "--env-file=.env", "src/mcp/index.ts"],
       "cwd": "/Users/anagnole/Projects/Brainifai",
       "env": {
-        "GRAPHSTORE_READONLY": "true"
+        "GRAPHSTORE_ON_DEMAND": "true"
       }
     },
     "fal-images": {

@@ -1,5 +1,5 @@
 import { MAX_SNIPPET_CHARS } from '../../shared/constants.js';
-import { extractTopics } from '../topic-extractor.js';
+import { extractAnnotations } from '../topic-extractor.js';
 import type { NormalizedMessage } from '../../shared/types.js';
 import type { ClickUpTask, ClickUpComment, ClickUpDoc, ClickUpTaskActivity } from './types.js';
 
@@ -36,8 +36,8 @@ export function normalizeClickUpTask(
 
   // Include task status as a topic
   const statusTopic = task.status?.status?.toLowerCase().replace(/\s+/g, '-');
-  const textTopics = extractTopics(text, allowlist);
-  const topics = [...new Set([...(statusTopic ? [statusTopic] : []), ...textTopics])].map((name) => ({ name }));
+  const annotations = extractAnnotations(text, allowlist);
+  const topics = [...new Set([...(statusTopic ? [statusTopic] : []), ...annotations.topics])].map((name) => ({ name }));
 
   return {
     activity: {
@@ -62,6 +62,7 @@ export function normalizeClickUpTask(
       linked_person_key: personKey,
     },
     topics,
+    urls: annotations.urls.length > 0 ? annotations.urls : undefined,
   };
 }
 
@@ -70,6 +71,7 @@ export function normalizeClickUpComment(
   listId: string,
   listName: string,
   allowlist: string[],
+  taskSourceId?: string,
 ): NormalizedMessage | null {
   if (!comment.user) return null;
   if (comment.resolved) return null;
@@ -77,7 +79,8 @@ export function normalizeClickUpComment(
 
   const snippet = truncate(comment.comment_text);
   const personKey = `clickup:${comment.user.id}`;
-  const topics = extractTopics(comment.comment_text, allowlist).map((name) => ({ name }));
+  const annotations = extractAnnotations(comment.comment_text, allowlist);
+  const topics = annotations.topics.map((name) => ({ name }));
 
   return {
     activity: {
@@ -86,6 +89,7 @@ export function normalizeClickUpComment(
       timestamp: msToIso(comment.date),
       kind: 'task_comment',
       snippet,
+      parent_source_id: taskSourceId,
     },
     person: {
       person_key: personKey,
@@ -101,6 +105,7 @@ export function normalizeClickUpComment(
       linked_person_key: personKey,
     },
     topics,
+    urls: annotations.urls.length > 0 ? annotations.urls : undefined,
   };
 }
 
@@ -114,6 +119,7 @@ export function normalizeClickUpStatusChange(
 
   const snippet = truncate(`${task.name}\nStatus: ${activityItem.before} → ${activityItem.after}`);
   const personKey = `clickup:${activityItem.user.id}`;
+  const taskSourceId = `clickup:${listId}:task:${task.id}`;
 
   return {
     activity: {
@@ -123,6 +129,7 @@ export function normalizeClickUpStatusChange(
       kind: 'status_change',
       snippet,
       url: task.url,
+      parent_source_id: taskSourceId,
     },
     person: {
       person_key: personKey,
@@ -154,7 +161,8 @@ export function normalizeClickUpDoc(
   const text = [doc.name, doc.content ?? ''].join('\n');
   const snippet = truncate(text);
   const personKey = `clickup:${doc.creator}`;
-  const topics = extractTopics(text, allowlist).map((name) => ({ name }));
+  const annotations = extractAnnotations(text, allowlist);
+  const topics = annotations.topics.map((name) => ({ name }));
 
   return {
     activity: {
@@ -183,5 +191,6 @@ export function normalizeClickUpDoc(
       linked_person_key: personKey,
     },
     topics,
+    urls: annotations.urls.length > 0 ? annotations.urls : undefined,
   };
 }

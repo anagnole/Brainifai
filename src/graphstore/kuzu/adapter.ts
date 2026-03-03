@@ -3,6 +3,7 @@ import type { QueryResult as KuzuQueryResult, KuzuValue } from 'kuzu';
 import { existsSync, mkdirSync } from 'node:fs';
 import { logger } from '../../shared/logger.js';
 import {
+  KUZU_MIGRATIONS,
   KUZU_NODE_TABLES,
   KUZU_REL_TABLES,
   KUZU_FTS_INDEXES,
@@ -117,6 +118,11 @@ export class KuzuGraphStore implements GraphStore {
       await this.exec(stmt);
     }
 
+    // Run migrations (add columns to existing tables — safe to re-run)
+    for (const stmt of KUZU_MIGRATIONS) {
+      try { await this.exec(stmt); } catch { /* column/table may already exist */ }
+    }
+
     logger.info('Kuzu schema tables created');
     await this.rebuildFtsIndexes();
   }
@@ -215,6 +221,13 @@ export class KuzuGraphStore implements GraphStore {
         idExpr: 'node.source + ":" + node.container_id',
         nameExpr: 'node.name',
       },
+      {
+        table: 'Activity',
+        index: 'activity_fts',
+        type: 'Activity',
+        idExpr: 'node.source_id',
+        nameExpr: 'CASE WHEN length(node.snippet) > 80 THEN left(node.snippet, 80) + "…" ELSE node.snippet END',
+      },
     ];
 
     // Filter which tables to search based on types
@@ -294,6 +307,8 @@ export class KuzuGraphStore implements GraphStore {
       MENTIONS: 'Activity',       // Activity→Topic
       IDENTIFIES: 'SourceAccount',// SourceAccount→Person
       OWNS: 'SourceAccount',      // SourceAccount→Activity
+      REPLIES_TO: 'Activity',     // Activity→Activity (reply→parent)
+      MENTIONS_PERSON: 'Activity',// Activity→Person (mention)
     };
 
     for (const relTable of this.allRelTypes()) {
@@ -537,10 +552,19 @@ export class KuzuGraphStore implements GraphStore {
       for (const [k, v] of Object.entries(edge.from)) params[`from_${k}`] = v as KuzuValue;
       for (const [k, v] of Object.entries(edge.to)) params[`to_${k}`] = v as KuzuValue;
 
+      // Build property SET clause for edge properties
+      const propKeys = edge.properties ? Object.keys(edge.properties) : [];
+      let propSet = '';
+      if (propKeys.length > 0) {
+        for (const [k, v] of Object.entries(edge.properties!)) params[`prop_${k}`] = v as KuzuValue;
+        propSet = 'ON CREATE SET ' + propKeys.map((k) => `r.${k} = $prop_${k}`).join(', ');
+      }
+
       await this.exec(
         `MATCH (a:${edge.fromLabel} {${fromMatch}})
          MATCH (b:${edge.toLabel} {${toMatch}})
-         MERGE (a)-[:${kuzuRelType}]->(b)`,
+         MERGE (a)-[r:${kuzuRelType}]->(b)
+         ${propSet}`,
         params,
       );
     }

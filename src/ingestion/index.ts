@@ -182,9 +182,10 @@ async function ingestClickUp(store: GraphStore) {
         }
 
         // Fetch comments for each task
+        const taskSourceId = `clickup:${listId}:task:${task.id}`;
         const comments = await fetchComments(client, task.id);
         for (const comment of comments) {
-          const commentItem = normalizeClickUpComment(comment, listId, listInfo.name, config.topicAllowlist);
+          const commentItem = normalizeClickUpComment(comment, listId, listInfo.name, config.topicAllowlist, taskSourceId);
           if (commentItem) {
             normalized.push(commentItem);
             commentCount++;
@@ -321,37 +322,49 @@ async function main() {
   const store = await getGraphStore();
   await store.initialize();
 
-  // Slack ingestion (skip if not configured)
+  // Collect configured source ingestion functions
+  const sources: Array<{ name: string; fn: () => Promise<void> }> = [];
+
   if (process.env.SLACK_BOT_TOKEN) {
-    await ingestSlack(store);
+    sources.push({ name: 'Slack', fn: () => ingestSlack(store) });
   } else {
     logger.info('SLACK_BOT_TOKEN not set — skipping Slack ingestion');
   }
 
-  // GitHub ingestion (skip if not configured)
   if (process.env.GITHUB_TOKEN) {
-    await ingestGitHub(store);
+    sources.push({ name: 'GitHub', fn: () => ingestGitHub(store) });
   } else {
     logger.info('GITHUB_TOKEN not set — skipping GitHub ingestion');
   }
 
-  // ClickUp ingestion (skip if not configured)
   if (process.env.CLICKUP_TOKEN) {
-    await ingestClickUp(store);
+    sources.push({ name: 'ClickUp', fn: () => ingestClickUp(store) });
   } else {
     logger.info('CLICKUP_TOKEN not set — skipping ClickUp ingestion');
   }
 
-  // Apple Calendar ingestion (skip if not configured)
   if (process.env.APPLE_CALDAV_USERNAME) {
-    await ingestAppleCalendar(store);
+    sources.push({ name: 'Apple Calendar', fn: () => ingestAppleCalendar(store) });
   } else {
     logger.info('APPLE_CALDAV_USERNAME not set — skipping Apple Calendar ingestion');
   }
 
-  await writeStatusFile(store, 'success');
+  // Run all sources in parallel
+  const results = await Promise.allSettled(sources.map((s) => s.fn()));
+
+  // Report per-source results
+  for (let i = 0; i < sources.length; i++) {
+    const result = results[i];
+    if (result.status === 'rejected') {
+      logger.error({ source: sources[i].name, err: result.reason }, 'Source ingestion failed');
+      console.error(`${sources[i].name}: FAILED — ${result.reason?.message ?? result.reason}`);
+    }
+  }
+
+  const anyFailed = results.some((r) => r.status === 'rejected');
+  await writeStatusFile(store, anyFailed ? 'error' : 'success');
   await closeGraphStore();
-  console.log('Ingestion complete');
+  console.log(`Ingestion complete (${results.filter((r) => r.status === 'fulfilled').length}/${sources.length} sources succeeded)`);
 }
 
 main().catch(async (err) => {

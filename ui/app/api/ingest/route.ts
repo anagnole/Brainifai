@@ -6,20 +6,29 @@ let activeProcess: ChildProcess | null = null
 let logBuffer: string[] = []
 let processStatus: 'idle' | 'running' | 'done' | 'error' = 'idle'
 
-export async function POST() {
+export async function POST(req: NextRequest) {
   if (activeProcess) {
     return NextResponse.json({ error: 'Ingestion already running' }, { status: 409 })
   }
+
+  let backfillDays: number | undefined
+  try {
+    const body = await req.json()
+    if (body.backfillDays && Number.isFinite(body.backfillDays)) {
+      backfillDays = Math.max(1, Math.min(365, body.backfillDays))
+    }
+  } catch { /* no body or invalid JSON — use default */ }
 
   logBuffer = []
   processStatus = 'running'
 
   const cwd = path.join(process.cwd(), '..')
+  const env = { ...process.env, FORCE_COLOR: '0', ...(backfillDays ? { BACKFILL_DAYS: String(backfillDays) } : {}) }
 
   const child = spawn('npm', ['run', 'ingest'], {
     cwd,
     shell: true,
-    env: { ...process.env, FORCE_COLOR: '0' },
+    env,
   })
 
   activeProcess = child

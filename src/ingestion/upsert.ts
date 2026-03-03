@@ -12,6 +12,8 @@ export async function upsertBatch(
 ): Promise<void> {
   if (messages.length === 0) return;
 
+  const now = new Date().toISOString();
+
   // ── Collect unique entities ────────────────────────────────────────────────
 
   const personsMap = new Map<string, Record<string, unknown>>();
@@ -25,6 +27,8 @@ export async function upsertBatch(
   const fromEdges: GraphEdge[] = [];
   const inEdges: GraphEdge[] = [];
   const mentionsEdges: GraphEdge[] = [];
+  const repliesToEdges: GraphEdge[] = [];
+  const mentionsPersonEdges: GraphEdge[] = [];
 
   for (const msg of messages) {
     const pk = msg.person.person_key;
@@ -33,6 +37,8 @@ export async function upsertBatch(
       display_name: msg.person.display_name,
       source: msg.person.source,
       source_id: msg.person.source_id,
+      created_at: now,
+      updated_at: now,
     });
 
     const ck = `${msg.container.source}:${msg.container.container_id}`;
@@ -41,6 +47,8 @@ export async function upsertBatch(
       container_id: msg.container.container_id,
       name: msg.container.name,
       kind: msg.container.kind,
+      created_at: now,
+      updated_at: now,
     });
 
     const ak = `${msg.account.source}:${msg.account.account_id}`;
@@ -48,6 +56,8 @@ export async function upsertBatch(
       source: msg.account.source,
       account_id: msg.account.account_id,
       linked_person_key: msg.account.linked_person_key,
+      created_at: now,
+      updated_at: now,
     });
 
     const actKey = `${msg.activity.source}:${msg.activity.source_id}`;
@@ -60,11 +70,19 @@ export async function upsertBatch(
         snippet: msg.activity.snippet,
         url: msg.activity.url ?? null,
         thread_ts: msg.activity.thread_ts ?? null,
+        parent_source_id: msg.activity.parent_source_id ?? null,
+        created_at: now,
+        updated_at: now,
+        valid_from: msg.activity.timestamp,
       });
     }
 
     for (const topic of msg.topics) {
-      topicsMap.set(topic.name, { name: topic.name });
+      topicsMap.set(topic.name, {
+        name: topic.name,
+        created_at: now,
+        updated_at: now,
+      });
     }
 
     // Edges
@@ -74,6 +92,7 @@ export async function upsertBatch(
       toLabel: 'Person',
       from: { source: msg.account.source, account_id: msg.account.account_id },
       to: { person_key: pk },
+      properties: { first_seen: now },
     });
 
     ownsEdges.push({
@@ -82,6 +101,7 @@ export async function upsertBatch(
       toLabel: 'Activity',
       from: { source: msg.account.source, account_id: msg.account.account_id },
       to: { source: msg.activity.source, source_id: msg.activity.source_id },
+      properties: { timestamp: msg.activity.timestamp },
     });
 
     fromEdges.push({
@@ -90,6 +110,7 @@ export async function upsertBatch(
       toLabel: 'Person',
       from: { source: msg.activity.source, source_id: msg.activity.source_id },
       to: { person_key: pk },
+      properties: { timestamp: msg.activity.timestamp },
     });
 
     inEdges.push({
@@ -98,6 +119,7 @@ export async function upsertBatch(
       toLabel: 'Container',
       from: { source: msg.activity.source, source_id: msg.activity.source_id },
       to: { source: msg.container.source, container_id: msg.container.container_id },
+      properties: { timestamp: msg.activity.timestamp },
     });
 
     for (const topic of msg.topics) {
@@ -107,7 +129,34 @@ export async function upsertBatch(
         toLabel: 'Topic',
         from: { source: msg.activity.source, source_id: msg.activity.source_id },
         to: { name: topic.name },
+        properties: { timestamp: msg.activity.timestamp },
       });
+    }
+
+    // REPLIES_TO edge — only when parent_source_id is set
+    if (msg.activity.parent_source_id) {
+      repliesToEdges.push({
+        type: 'REPLIES_TO',
+        fromLabel: 'Activity',
+        toLabel: 'Activity',
+        from: { source: msg.activity.source, source_id: msg.activity.source_id },
+        to: { source_id: msg.activity.parent_source_id },
+        properties: { timestamp: msg.activity.timestamp },
+      });
+    }
+
+    // MENTIONS_PERSON edges — from extracted @mentions
+    if (msg.mentions) {
+      for (const personKey of msg.mentions) {
+        mentionsPersonEdges.push({
+          type: 'MENTIONS_PERSON',
+          fromLabel: 'Activity',
+          toLabel: 'Person',
+          from: { source: msg.activity.source, source_id: msg.activity.source_id },
+          to: { person_key: personKey },
+          properties: { timestamp: msg.activity.timestamp },
+        });
+      }
     }
   }
 
@@ -126,6 +175,12 @@ export async function upsertBatch(
   await store.upsertEdges('FROM', fromEdges);
   await store.upsertEdges('IN', inEdges);
   await store.upsertEdges('MENTIONS', mentionsEdges);
+  if (repliesToEdges.length > 0) {
+    await store.upsertEdges('REPLIES_TO', repliesToEdges);
+  }
+  if (mentionsPersonEdges.length > 0) {
+    await store.upsertEdges('MENTIONS_PERSON', mentionsPersonEdges);
+  }
 
   logger.info({ count: messages.length }, 'Upserted batch');
 }

@@ -1,5 +1,5 @@
 import { MAX_SNIPPET_CHARS } from '../../shared/constants.js';
-import { extractTopics } from '../topic-extractor.js';
+import { extractAnnotations } from '../topic-extractor.js';
 import type { NormalizedMessage } from '../../shared/types.js';
 import { parseICalDate } from './client.js';
 import type { CalendarEvent } from './types.js';
@@ -22,7 +22,8 @@ export function normalizeCalendarEvent(
 
   const text = [event.summary, event.description ?? ''].join('\n');
   const snippet = truncate(text);
-  const topics = extractTopics(text, allowlist).map((name) => ({ name }));
+  const annotations = extractAnnotations(text, allowlist);
+  const topics = annotations.topics.map((name) => ({ name }));
 
   // Use the organizer if available, otherwise fall back to the calendar owner
   const organizerEmail = event.organizer?.email ?? calendarOwner;
@@ -56,5 +57,6 @@ export function normalizeCalendarEvent(
       linked_person_key: personKey,
     },
     topics,
+    urls: annotations.urls.length > 0 ? annotations.urls : undefined,
   };
 }

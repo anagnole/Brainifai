@@ -164,41 +164,97 @@ export class Neo4jGraphStore implements GraphStore {
       const minScore = opts.minScore ?? GS_DEFAULT_MIN_SCORE;
       const limit = opts.limit ?? GS_DEFAULT_SEARCH_LIMIT;
 
-      const typeFilter = opts.types && opts.types.length > 0
-        ? `AND any(label IN labels(node) WHERE label IN $types)`
-        : '';
+      const results: SearchResult[] = [];
 
-      const result = await withTimeout(
-        session.run(
-          `CALL db.index.fulltext.queryNodes('entity_search', $query)
-           YIELD node, score
-           WHERE score > $minScore ${typeFilter}
-           RETURN
-             CASE
-               WHEN node:Person THEN node.person_key
-               WHEN node:Container THEN node.source + ':' + node.container_id
-               ELSE node.name
-             END AS id,
-             head(labels(node)) AS type,
-             coalesce(node.display_name, node.name) AS name,
-             score
-           ORDER BY score DESC
-           LIMIT $limit`,
-          {
-            query: fuzzyQuery,
-            minScore,
-            types: opts.types ?? [],
-            limit: neo4j.int(limit),
-          },
-        ),
-      );
+      // Search entities (Person, Topic, Container)
+      const searchEntities = !opts.types || opts.types.length === 0
+        || opts.types.some((t) => ['Person', 'Topic', 'Container'].includes(t));
 
-      return result.records.map((r) => ({
-        id: r.get('id') as string,
-        type: r.get('type') as string,
-        name: r.get('name') as string,
-        score: r.get('score') as number,
-      }));
+      if (searchEntities) {
+        const typeFilter = opts.types && opts.types.length > 0
+          ? `AND any(label IN labels(node) WHERE label IN $types)`
+          : '';
+
+        const entityResult = await withTimeout(
+          session.run(
+            `CALL db.index.fulltext.queryNodes('entity_search', $query)
+             YIELD node, score
+             WHERE score > $minScore ${typeFilter}
+             RETURN
+               CASE
+                 WHEN node:Person THEN node.person_key
+                 WHEN node:Container THEN node.source + ':' + node.container_id
+                 ELSE node.name
+               END AS id,
+               head(labels(node)) AS type,
+               coalesce(node.display_name, node.name) AS name,
+               score
+             ORDER BY score DESC
+             LIMIT $limit`,
+            {
+              query: fuzzyQuery,
+              minScore,
+              types: opts.types ?? [],
+              limit: neo4j.int(limit),
+            },
+          ),
+        );
+
+        for (const r of entityResult.records) {
+          results.push({
+            id: r.get('id') as string,
+            type: r.get('type') as string,
+            name: r.get('name') as string,
+            score: r.get('score') as number,
+          });
+        }
+      }
+
+      // Search activities
+      const searchActivities = !opts.types || opts.types.length === 0
+        || opts.types.includes('Activity');
+
+      if (searchActivities) {
+        try {
+          const activityResult = await withTimeout(
+            session.run(
+              `CALL db.index.fulltext.queryNodes('activity_search', $query)
+               YIELD node, score
+               WHERE score > $minScore
+               RETURN
+                 node.source_id AS id,
+                 'Activity' AS type,
+                 CASE
+                   WHEN size(node.snippet) > 80 THEN left(node.snippet, 80) + '…'
+                   ELSE node.snippet
+                 END AS name,
+                 score
+               ORDER BY score DESC
+               LIMIT $limit`,
+              {
+                query: fuzzyQuery,
+                minScore,
+                limit: neo4j.int(limit),
+              },
+            ),
+          );
+
+          for (const r of activityResult.records) {
+            results.push({
+              id: r.get('id') as string,
+              type: r.get('type') as string,
+              name: r.get('name') as string,
+              score: r.get('score') as number,
+            });
+          }
+        } catch {
+          // Activity fulltext index may not exist yet
+        }
+      }
+
+      // Sort by score DESC, take top `limit`
+      results.sort((a, b) => b.score - a.score);
+      return results.slice(0, limit);
     } finally {
       await session.close();
     }
@@ -504,6 +560,7 @@ export class Neo4jGraphStore implements GraphStore {
           const propKeys = batch[0]?.properties ? Object.keys(batch[0].properties) : [];
           const propSet = propKeys.length > 0
             ? 'ON CREATE SET ' + propKeys.map((k) => `r.${k} = item.prop_${k}`).join(', ')
+              + ' ON MATCH SET ' + propKeys.map((k) => `r.${k} = item.prop_${k}`).join(', ')
             : '';
 
           await tx.run(

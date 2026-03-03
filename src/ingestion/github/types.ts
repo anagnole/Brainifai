@@ -34,6 +34,7 @@ export interface GitHubComment {
   user: GitHubUser;
   created_at: string;
   html_url: string;
+  pull_request_url?: string; // GitHub API returns this for PR issue comments
 }
 
 export interface GitHubReview {
