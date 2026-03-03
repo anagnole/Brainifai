@@ -1,10 +1,10 @@
-import { seedSchema } from '../shared/schema.js';
-import { closeDriver } from '../shared/neo4j.js';
+import { getGraphStore, closeGraphStore } from '../shared/graphstore.js';
 
 async function main() {
-  await seedSchema();
+  const store = await getGraphStore();
+  await store.initialize();
   console.log('Schema seeded successfully');
-  await closeDriver();
+  await closeGraphStore();
 }
 
 main().catch((err) => {

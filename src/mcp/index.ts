@@ -1,9 +1,13 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createServer } from './server.js';
-import { closeDriver } from '../shared/neo4j.js';
+import { getGraphStore, closeGraphStore } from '../shared/graphstore.js';
 import { logger } from '../shared/logger.js';
 
 async function main() {
+  // Initialize GraphStore so queries are ready
+  const store = await getGraphStore();
+  await store.initialize();
+
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -12,6 +16,6 @@ async function main() {
 
 main().catch(async (err) => {
   logger.error(err, 'MCP server failed to start');
-  await closeDriver();
+  await closeGraphStore();
   process.exit(1);
 });

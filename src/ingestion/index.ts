@@ -1,13 +1,15 @@
-import { closeDriver } from '../shared/neo4j.js';
+import { writeFileSync, mkdirSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { getGraphStore, closeGraphStore } from '../shared/graphstore.js';
 import { UPSERT_BATCH_SIZE } from '../shared/constants.js';
 import { logger } from '../shared/logger.js';
-import { seedSchema } from '../shared/schema.js';
 import { getSlackConfig } from './slack/config.js';
 import { getSlackClient, verifyAuth, fetchChannelInfo, fetchChannelHistory } from './slack/client.js';
 import { normalizeSlackMessage } from './normalize.js';
 import { getCursor, setCursor } from './cursor.js';
 import { upsertBatch } from './upsert.js';
 import type { NormalizedMessage } from '../shared/types.js';
+import type { GraphStore } from '../graphstore/types.js';
 import { getGitHubConfig } from './github/config.js';
 import { getGitHubClient, verifyAuth as verifyGitHubAuth, fetchPRs, fetchPRComments, fetchPRReviews } from './github/client.js';
 import { normalizeGitHubPR, normalizeGitHubComment, normalizeGitHubReview } from './github/normalize.js';
@@ -18,7 +20,7 @@ import { getAppleCalendarConfig } from './apple-calendar/config.js';
 import { fetchCalendarEvents } from './apple-calendar/client.js';
 import { normalizeCalendarEvent } from './apple-calendar/normalize.js';
 
-async function ingestSlack() {
+async function ingestSlack(store: GraphStore) {
   const config = getSlackConfig();
   const slack = getSlackClient(config.token);
 
@@ -28,7 +30,7 @@ async function ingestSlack() {
     const channelInfo = await fetchChannelInfo(slack, channelId);
     logger.info({ channel: channelInfo.name, id: channelId }, 'Processing channel');
 
-    const cursor = await getCursor('slack', channelId);
+    const cursor = await getCursor(store, 'slack', channelId);
     const oldest = cursor ?? String(
       (Date.now() / 1000) - config.backfillDays * 86400,
     );
@@ -52,21 +54,21 @@ async function ingestSlack() {
       }
 
       for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
-        await upsertBatch(normalized.slice(i, i + UPSERT_BATCH_SIZE));
+        await upsertBatch(store, normalized.slice(i, i + UPSERT_BATCH_SIZE));
       }
 
       totalIngested += normalized.length;
     }
 
     if (latestTs !== oldest) {
-      await setCursor('slack', channelId, latestTs);
+      await setCursor(store, 'slack', channelId, latestTs);
     }
 
     console.log(`Slack #${channelInfo.name}: ingested ${totalIngested} messages`);
   }
 }
 
-async function ingestGitHub() {
+async function ingestGitHub(store: GraphStore) {
   const config = getGitHubConfig();
   const client = getGitHubClient(config.token);
 
@@ -82,7 +84,7 @@ async function ingestGitHub() {
 
     // --- Pull Requests ---
     const prCursorKey = `${repoFullName}:prs`;
-    const prSince = (await getCursor('github', prCursorKey)) ?? backfillSince;
+    const prSince = (await getCursor(store, 'github', prCursorKey)) ?? backfillSince;
     let prCount = 0;
     let latestPrTs = prSince;
 
@@ -105,19 +107,19 @@ async function ingestGitHub() {
       }
 
       for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
-        await upsertBatch(normalized.slice(i, i + UPSERT_BATCH_SIZE));
+        await upsertBatch(store, normalized.slice(i, i + UPSERT_BATCH_SIZE));
       }
 
       prCount += page.length;
     }
 
     if (latestPrTs !== prSince) {
-      await setCursor('github', prCursorKey, latestPrTs);
+      await setCursor(store, 'github', prCursorKey, latestPrTs);
     }
 
     // --- PR Comments ---
     const commentCursorKey = `${repoFullName}:comments`;
-    const commentSince = (await getCursor('github', commentCursorKey)) ?? backfillSince;
+    const commentSince = (await getCursor(store, 'github', commentCursorKey)) ?? backfillSince;
     let commentCount = 0;
     let latestCommentTs = commentSince;
 
@@ -133,21 +135,21 @@ async function ingestGitHub() {
       }
 
       for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
-        await upsertBatch(normalized.slice(i, i + UPSERT_BATCH_SIZE));
+        await upsertBatch(store, normalized.slice(i, i + UPSERT_BATCH_SIZE));
       }
 
       commentCount += page.length;
     }
 
     if (latestCommentTs !== commentSince) {
-      await setCursor('github', commentCursorKey, latestCommentTs);
+      await setCursor(store, 'github', commentCursorKey, latestCommentTs);
     }
 
     console.log(`GitHub ${repoFullName}: ingested ${prCount} PRs, ${commentCount} comments`);
   }
 }
 
-async function ingestClickUp() {
+async function ingestClickUp(store: GraphStore) {
   const config = getClickUpConfig();
   const client = getClickUpClient(config.token);
 
@@ -163,7 +165,7 @@ async function ingestClickUp() {
     logger.info({ list: listInfo.name, id: listId }, 'Processing ClickUp list');
 
     const taskCursorKey = `${listId}:tasks`;
-    const taskSince = (await getCursor('clickup', taskCursorKey)) ?? backfillSince;
+    const taskSince = (await getCursor(store, 'clickup', taskCursorKey)) ?? backfillSince;
     let taskCount = 0;
     let commentCount = 0;
     let latestTaskTs = taskSince;
@@ -204,14 +206,14 @@ async function ingestClickUp() {
       }
 
       for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
-        await upsertBatch(normalized.slice(i, i + UPSERT_BATCH_SIZE));
+        await upsertBatch(store, normalized.slice(i, i + UPSERT_BATCH_SIZE));
       }
 
       taskCount += page.length;
     }
 
     if (latestTaskTs !== taskSince) {
-      await setCursor('clickup', taskCursorKey, latestTaskTs);
+      await setCursor(store, 'clickup', taskCursorKey, latestTaskTs);
     }
 
     console.log(`ClickUp ${listInfo.name}: ingested ${taskCount} tasks, ${commentCount} comments`);
@@ -220,7 +222,7 @@ async function ingestClickUp() {
   // --- Docs (per workspace) ---
   try {
     const docCursorKey = `${workspaceId}:docs`;
-    const docSince = (await getCursor('clickup', docCursorKey)) ?? backfillSince;
+    const docSince = (await getCursor(store, 'clickup', docCursorKey)) ?? backfillSince;
     let docCount = 0;
     let latestDocTs = docSince;
 
@@ -240,12 +242,12 @@ async function ingestClickUp() {
       }
 
       for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
-        await upsertBatch(normalized.slice(i, i + UPSERT_BATCH_SIZE));
+        await upsertBatch(store, normalized.slice(i, i + UPSERT_BATCH_SIZE));
       }
     }
 
     if (latestDocTs !== docSince) {
-      await setCursor('clickup', docCursorKey, latestDocTs);
+      await setCursor(store, 'clickup', docCursorKey, latestDocTs);
     }
 
     console.log(`ClickUp workspace: ingested ${docCount} docs`);
@@ -255,14 +257,14 @@ async function ingestClickUp() {
   }
 }
 
-async function ingestAppleCalendar() {
+async function ingestAppleCalendar(store: GraphStore) {
   const config = getAppleCalendarConfig();
   const backfillSince = new Date(
     Date.now() - config.backfillDays * 86400 * 1000,
   ).toISOString();
 
   const cursorKey = `${config.username}:calendars`;
-  const since = (await getCursor('apple-calendar', cursorKey)) ?? backfillSince;
+  const since = (await getCursor(store, 'apple-calendar', cursorKey)) ?? backfillSince;
 
   const events = await fetchCalendarEvents(config.username, config.password, since, config.calendarFilter);
 
@@ -273,51 +275,92 @@ async function ingestAppleCalendar() {
   }
 
   for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
-    await upsertBatch(normalized.slice(i, i + UPSERT_BATCH_SIZE));
+    await upsertBatch(store, normalized.slice(i, i + UPSERT_BATCH_SIZE));
   }
 
-  await setCursor('apple-calendar', cursorKey, new Date().toISOString());
+  await setCursor(store, 'apple-calendar', cursorKey, new Date().toISOString());
   console.log(`Apple Calendar: ingested ${normalized.length} events`);
 }
 
+async function writeStatusFile(store: GraphStore, status: 'success' | 'error') {
+  const [people, topics, containers, activities, cursorNodes] = await Promise.all([
+    store.findNodes('Person', {}, { limit: 100000 }),
+    store.findNodes('Topic', {}, { limit: 100000 }),
+    store.findNodes('Container', {}, { limit: 100000 }),
+    store.findNodes('Activity', {}, { limit: 100000 }),
+    store.findNodes('Cursor', {}, { limit: 100 }),
+  ]);
+
+  const cursors = cursorNodes.map((n) => ({
+    source: (n.properties.source as string) ?? '',
+    container_id: (n.properties.container_id as string) ?? '',
+    ts: (n.properties.latest_ts as string) ?? '',
+  })).sort((a, b) => b.ts.localeCompare(a.ts));
+
+  const payload = {
+    lastRun: new Date().toISOString(),
+    lastStatus: status,
+    counts: {
+      people: people.length,
+      topics: topics.length,
+      containers: containers.length,
+      activities: activities.length,
+    },
+    cursors,
+  };
+
+  const filePath = resolve(process.cwd(), 'data/status.json');
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, JSON.stringify(payload, null, 2));
+  logger.info({ path: filePath }, 'Wrote status.json');
+}
+
 async function main() {
-  await seedSchema();
+  // Ingestion always needs write access regardless of GRAPHSTORE_READONLY
+  process.env.GRAPHSTORE_READONLY = 'false';
+  const store = await getGraphStore();
+  await store.initialize();
 
   // Slack ingestion (skip if not configured)
   if (process.env.SLACK_BOT_TOKEN) {
-    await ingestSlack();
+    await ingestSlack(store);
   } else {
     logger.info('SLACK_BOT_TOKEN not set — skipping Slack ingestion');
   }
 
   // GitHub ingestion (skip if not configured)
   if (process.env.GITHUB_TOKEN) {
-    await ingestGitHub();
+    await ingestGitHub(store);
   } else {
     logger.info('GITHUB_TOKEN not set — skipping GitHub ingestion');
   }
 
   // ClickUp ingestion (skip if not configured)
   if (process.env.CLICKUP_TOKEN) {
-    await ingestClickUp();
+    await ingestClickUp(store);
   } else {
     logger.info('CLICKUP_TOKEN not set — skipping ClickUp ingestion');
   }
 
   // Apple Calendar ingestion (skip if not configured)
   if (process.env.APPLE_CALDAV_USERNAME) {
-    await ingestAppleCalendar();
+    await ingestAppleCalendar(store);
   } else {
     logger.info('APPLE_CALDAV_USERNAME not set — skipping Apple Calendar ingestion');
   }
 
-  await closeDriver();
+  await writeStatusFile(store, 'success');
+  await closeGraphStore();
   console.log('Ingestion complete');
 }
 
 main().catch(async (err) => {
   logger.error(err, 'Ingestion failed');
   console.error('Ingestion failed:', err.message);
-  await closeDriver();
+  try {
+    const store = await getGraphStore();
+    await writeStatusFile(store, 'error');
+  } catch { /* best effort */ }
+  await closeGraphStore();
   process.exit(1);
 });

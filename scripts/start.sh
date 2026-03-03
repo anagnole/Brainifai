@@ -17,30 +17,43 @@ if [ -s "$HOME/.nvm/nvm.sh" ]; then
   nvm use default 2>/dev/null || true
 fi
 
-# --- 1. Ensure Docker Desktop is running ---
-if ! docker info >/dev/null 2>&1; then
-  log "Starting Docker Desktop..."
-  open -a Docker
-  for i in $(seq 1 60); do
-    docker info >/dev/null 2>&1 && break
-    log "Waiting for Docker... ($i/60)"
-    sleep 2
-  done
+# --- Read backend from .env ---
+BACKEND="kuzu"
+if [ -f "$PROJECT_DIR/.env" ]; then
+  BACKEND=$(grep -E '^GRAPHSTORE_BACKEND=' "$PROJECT_DIR/.env" | cut -d= -f2 | tr -d '[:space:]' || echo "kuzu")
+  [ -z "$BACKEND" ] && BACKEND="kuzu"
 fi
+log "GraphStore backend: $BACKEND"
 
-# --- 2. Start Neo4j ---
-log "Starting Neo4j..."
-cd "$PROJECT_DIR"
-docker compose up -d
+# --- Start Neo4j only if backend=neo4j ---
+if [ "$BACKEND" = "neo4j" ]; then
+  # 1. Ensure Docker Desktop is running
+  if ! docker info >/dev/null 2>&1; then
+    log "Starting Docker Desktop..."
+    open -a Docker
+    for i in $(seq 1 60); do
+      docker info >/dev/null 2>&1 && break
+      log "Waiting for Docker... ($i/60)"
+      sleep 2
+    done
+  fi
 
-# --- 3. Wait for Neo4j healthy ---
-log "Waiting for Neo4j healthcheck..."
-for i in $(seq 1 30); do
-  STATUS=$(docker inspect --format='{{.State.Health.Status}}' brainifai-neo4j 2>/dev/null || echo "missing")
-  [ "$STATUS" = "healthy" ] && { log "Neo4j ready."; break; }
-  log "Neo4j status: $STATUS ($i/30)"
-  sleep 3
-done
+  # 2. Start Neo4j
+  log "Starting Neo4j..."
+  cd "$PROJECT_DIR"
+  docker compose up -d
+
+  # 3. Wait for Neo4j healthy
+  log "Waiting for Neo4j healthcheck..."
+  for i in $(seq 1 30); do
+    STATUS=$(docker inspect --format='{{.State.Health.Status}}' brainifai-neo4j 2>/dev/null || echo "missing")
+    [ "$STATUS" = "healthy" ] && { log "Neo4j ready."; break; }
+    log "Neo4j status: $STATUS ($i/30)"
+    sleep 3
+  done
+else
+  log "Using Kuzu (embedded) — no Docker needed."
+fi
 
 # --- 4. Hand off to UI server (exec: launchd tracks this PID) ---
 log "Starting UI..."

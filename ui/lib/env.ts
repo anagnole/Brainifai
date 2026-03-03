@@ -1,10 +1,8 @@
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
 
-// Resolve relative to this file: ui/lib/env.ts → ui/ → repo root → .env
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const ENV_PATH = path.join(__dirname, '..', '..', '.env')
+// process.cwd() is the ui/ directory in Next.js; .env is one level up
+const ENV_PATH = path.join(process.cwd(), '..', '.env')
 
 export function readEnv(): Record<string, string> {
   try {

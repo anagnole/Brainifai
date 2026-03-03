@@ -14,13 +14,15 @@
     "launch": "bash scripts/launchagent.sh install",
     "launch:stop": "bash scripts/launchagent.sh uninstall",
     "launch:status": "bash scripts/launchagent.sh status",
-    "launch:logs": "tail -f logs/brainifai.log"
+    "launch:logs": "tail -f logs/brainifai.log",
+    "test": "vitest run"
   },
   "dependencies": {
     "@fal-ai/client": "^1.9.3",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "@octokit/rest": "^22.0.1",
     "@slack/web-api": "^7.14.0",
+    "kuzu": "^0.11.3",
     "neo4j-driver": "^5.27.0",
     "pino": "^9.6.0",
     "tsdav": "^2.1.8",
@@ -29,6 +31,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.18"
   }
 }

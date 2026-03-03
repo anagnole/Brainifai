@@ -1,12 +1,21 @@
-import { getDriver, closeDriver } from '../shared/neo4j.js';
+import { getGraphStore, closeGraphStore } from '../shared/graphstore.js';
 
 async function main() {
-  const driver = getDriver();
-  const info = await driver.getServerInfo();
-  console.log('Connected to Neo4j');
-  console.log(`  Address: ${info.address}`);
-  console.log(`  Version: ${info.protocolVersion}`);
-  await closeDriver();
+  const backend = process.env.GRAPHSTORE_BACKEND ?? 'kuzu';
+  console.log(`Testing connection to ${backend} backend...`);
+
+  const store = await getGraphStore();
+  await store.initialize();
+
+  // Verify we can read by checking node counts
+  const people = await store.findNodes('Person', {}, { limit: 1 });
+  const activities = await store.findNodes('Activity', {}, { limit: 1 });
+  console.log(`Connected successfully`);
+  console.log(`  Backend: ${backend}`);
+  console.log(`  Has people: ${people.length > 0}`);
+  console.log(`  Has activities: ${activities.length > 0}`);
+
+  await closeGraphStore();
 }
 
 main().catch((err) => {

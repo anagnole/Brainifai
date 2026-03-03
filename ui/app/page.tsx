@@ -1,52 +1,14 @@
 import Link from 'next/link'
 import { readEnv } from '@/lib/env'
-import { runQuery } from '@/lib/neo4j'
+import { readStatus } from '@/lib/status'
+
+export const dynamic = 'force-dynamic'
 
 interface Stats {
   people: number
   topics: number
   containers: number
   activities: number
-}
-
-interface Cursor {
-  source: string
-  container_id: string
-  ts: string
-}
-
-async function getStats(): Promise<Stats> {
-  try {
-    const [people, topics, containers, activities] = await Promise.all([
-      runQuery('MATCH (n:Person) RETURN count(n) AS count'),
-      runQuery('MATCH (n:Topic) RETURN count(n) AS count'),
-      runQuery('MATCH (n:Container) RETURN count(n) AS count'),
-      runQuery('MATCH (n:Activity) RETURN count(n) AS count'),
-    ])
-    return {
-      people: people[0]?.get('count').toNumber() ?? 0,
-      topics: topics[0]?.get('count').toNumber() ?? 0,
-      containers: containers[0]?.get('count').toNumber() ?? 0,
-      activities: activities[0]?.get('count').toNumber() ?? 0,
-    }
-  } catch {
-    return { people: 0, topics: 0, containers: 0, activities: 0 }
-  }
-}
-
-async function getCursors(): Promise<Cursor[]> {
-  try {
-    const records = await runQuery(
-      'MATCH (cur:Cursor) RETURN cur.source, cur.container_id, cur.ts ORDER BY cur.ts DESC'
-    )
-    return records.map((r) => ({
-      source: r.get('cur.source') ?? '',
-      container_id: r.get('cur.container_id') ?? '',
-      ts: r.get('cur.ts') ?? '',
-    }))
-  } catch {
-    return []
-  }
 }
 
 const statCards = [
@@ -122,11 +84,10 @@ function formatTs(ts: string): string {
 }
 
 export default async function DashboardPage() {
-  const [stats, cursors, env] = await Promise.all([
-    getStats(),
-    getCursors(),
-    Promise.resolve(readEnv()),
-  ])
+  const statusData = readStatus()
+  const env = readEnv()
+  const stats: Stats = statusData?.counts ?? { people: 0, topics: 0, containers: 0, activities: 0 }
+  const cursors = statusData?.cursors ?? []
 
   return (
     <div className="max-w-5xl mx-auto space-y-8">
@@ -134,6 +95,14 @@ export default async function DashboardPage() {
       <div>
         <h1 className="text-2xl font-bold text-zinc-100">Brainifai</h1>
         <p className="text-zinc-400 mt-1">Personal Knowledge Graph</p>
+        {statusData?.lastRun && (
+          <p className="text-zinc-500 text-sm mt-2">
+            Last ingestion: {new Date(statusData.lastRun).toLocaleString()}
+            {statusData.lastStatus === 'error' && (
+              <span className="ml-2 text-red-400">(failed)</span>
+            )}
+          </p>
+        )}
       </div>
 
       {/* Stat cards */}
