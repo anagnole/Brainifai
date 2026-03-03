@@ -3,10 +3,7 @@
     "brainifai": {
       "command": "npx",
       "args": ["tsx", "--env-file=.env", "src/mcp/index.ts"],
-      "cwd": "/Users/anagnole/Projects/Brainifai",
-      "env": {
-        "GRAPHSTORE_READONLY": "true"
-      }
+      "cwd": "/Users/anagnole/Projects/Brainifai"
     },
     "fal-images": {
       "command": "npx",
