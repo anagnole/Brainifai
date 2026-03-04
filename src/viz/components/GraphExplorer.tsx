@@ -1,7 +1,7 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import Graph from 'graphology';
 import type { EntitySummary } from '../lib/api';
-import { fetchNeighborhood, fetchEntitySummary } from '../lib/api';
+import { fetchNeighborhood, fetchEntitySummary, fetchOverview } from '../lib/api';
 import { mergeSubgraph, updateNodeSizes } from '../lib/graph-builder';
 import { runLayout } from '../lib/layout';
 import { SigmaRenderer } from './SigmaRenderer';
@@ -21,6 +21,24 @@ export function GraphExplorer() {
   });
   // Counter to force re-render when graph changes
   const [, setGraphVersion] = useState(0);
+  const [loading, setLoading] = useState(true);
+
+  // Load initial overview graph on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const subgraph = await fetchOverview();
+        if (subgraph.nodes.length > 0) {
+          mergeSubgraph(graph, subgraph);
+          updateNodeSizes(graph);
+          runLayout(graph);
+          setGraphVersion((v) => v + 1);
+        }
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [graph]);
 
   const expandNode = useCallback(
     async (nodeId: string) => {
@@ -92,6 +110,14 @@ export function GraphExplorer() {
         onNodeClick={handleNodeClick}
         highlightedNodes={highlightedNodes}
       />
+      {loading && (
+        <div className="loading-overlay">Loading graph...</div>
+      )}
+      {!loading && graph.order === 0 && (
+        <div className="empty-overlay">
+          Search for a person, topic, or channel to explore your knowledge graph
+        </div>
+      )}
     </div>
   );
 }

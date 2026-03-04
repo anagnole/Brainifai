@@ -198,3 +198,17 @@ body {
 .toolbar button:hover {
   background: var(--border);
 }
+
+/* Overlays */
+.loading-overlay,
+.empty-overlay {
+  position: absolute;
+  top: 50%;
+  left: calc(50% + 160px); /* offset for sidebar */
+  transform: translate(-50%, -50%);
+  color: var(--text-muted);
+  font-size: 16px;
+  pointer-events: none;
+  text-align: center;
+  max-width: 300px;
+}
