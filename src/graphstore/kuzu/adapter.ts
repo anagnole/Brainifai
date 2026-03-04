@@ -20,6 +20,7 @@ import {
   GS_MAX_TIMELINE_LIMIT,
   GS_DEFAULT_MIN_SCORE,
 } from '../defaults.js';
+import { resolveEntityId } from '../resolve-entity.js';
 import type {
   GraphStore,
   GraphNode,
@@ -596,7 +597,7 @@ export class KuzuGraphStore implements GraphStore {
 
   async getEntitySummary(entityId: string): Promise<EntitySummary | null> {
     // Try each label
-    for (const { label, keyExpr, nameExpr, key } of this.resolveEntityId(entityId)) {
+    for (const { label, keyExpr, nameExpr, key } of resolveEntityId(entityId)) {
       try {
         const whereClause = Object.keys(key)
           .map((k) => `entity.${k} = $${k}`)
@@ -765,38 +766,7 @@ export class KuzuGraphStore implements GraphStore {
     }
   }
 
-  private resolveEntityId(entityId: string): Array<{
-    label: string;
-    keyExpr: string;
-    nameExpr: string;
-    key: Record<string, unknown>;
-  }> {
-    return [
-      {
-        label: 'Person',
-        keyExpr: 'entity.person_key',
-        nameExpr: 'entity.display_name',
-        key: { person_key: entityId },
-      },
-      {
-        label: 'Topic',
-        keyExpr: 'entity.name',
-        nameExpr: 'entity.name',
-        key: { name: entityId },
-      },
-      {
-        label: 'Container',
-        keyExpr: "entity.source + ':' + entity.container_id",
-        nameExpr: 'entity.name',
-        key: (() => {
-          const idx = entityId.indexOf(':');
-          return idx > 0
-            ? { source: entityId.slice(0, idx), container_id: entityId.slice(idx + 1) }
-            : { container_id: entityId };
-        })(),
-      },
-    ];
-  }
+  // resolveEntityId is now imported from ../resolve-entity.js
 
   private allRelTypes(): string[] {
     return Object.values(REL_TYPE_MAP);
