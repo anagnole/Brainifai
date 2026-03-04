@@ -15,23 +15,40 @@
     "launch:stop": "bash scripts/launchagent.sh uninstall",
     "launch:status": "bash scripts/launchagent.sh status",
     "launch:logs": "tail -f logs/brainifai.log",
-    "test": "vitest run"
+    "test": "vitest run",
+    "viz:dev": "npx concurrently \"tsx --env-file=.env src/api/server.ts\" \"npx vite --config src/viz/vite.config.ts\"",
+    "viz:build": "npx vite build --config src/viz/vite.config.ts",
+    "viz": "npm run viz:build && tsx --env-file=.env src/api/server.ts"
   },
   "dependencies": {
     "@fal-ai/client": "^1.9.3",
+    "@fastify/cors": "^11.2.0",
+    "@fastify/static": "^9.0.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "@octokit/rest": "^22.0.1",
     "@slack/web-api": "^7.14.0",
+    "fastify": "^5.7.4",
+    "graphology": "^0.26.0",
+    "graphology-layout-forceatlas2": "^0.10.1",
+    "graphology-layout-noverlap": "^0.4.2",
+    "graphology-types": "^0.24.8",
     "kuzu": "^0.11.3",
     "neo4j-driver": "^5.27.0",
     "pino": "^9.6.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "sigma": "^3.0.2",
     "tsdav": "^2.1.8",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
+    "vite": "^7.3.1",
     "vitest": "^4.0.18"
   }
 }
