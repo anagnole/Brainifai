@@ -25,11 +25,18 @@ export async function getRecentActivity(opts: {
   const limit = Math.min(opts.limit ?? 20, 50);
   const windowStart = new Date(Date.now() - windowDays * 86400 * 1000).toISOString();
 
+  // Strip source prefix from containerId if present (e.g. "clickup:123" → "123")
+  let containerId = opts.containerId;
+  if (containerId) {
+    const colonIdx = containerId.indexOf(':');
+    if (colonIdx > 0) containerId = containerId.slice(colonIdx + 1);
+  }
+
   const store = await getGraphStore();
   const items = await store.getRecentActivity({
     personKey: opts.personKey,
     topic: opts.topic,
-    containerId: opts.containerId,
+    containerId,
     since: windowStart,
     limit,
   });

@@ -4,6 +4,10 @@ import { getGraphStore, closeGraphStore } from '../shared/graphstore.js';
 import { logger } from '../shared/logger.js';
 
 async function main() {
+  // Force on-demand mode so the MCP server doesn't hold a persistent Kuzu lock.
+  // This allows ingest_memory (and batch ingestion) to open write connections.
+  process.env.GRAPHSTORE_ON_DEMAND = 'true';
+
   // Initialize GraphStore so queries are ready
   const store = await getGraphStore();
   await store.initialize();

@@ -19,6 +19,11 @@ import { normalizeClickUpTask, normalizeClickUpComment, normalizeClickUpStatusCh
 import { getAppleCalendarConfig } from './apple-calendar/config.js';
 import { fetchCalendarEvents } from './apple-calendar/client.js';
 import { normalizeCalendarEvent } from './apple-calendar/normalize.js';
+import { existsSync } from 'fs';
+import { getClaudeCodeConfig } from './claude-code/config.js';
+import { discoverProjects, listSessionFiles, parseSessionFile } from './claude-code/client.js';
+import { summarizeSession, fallbackSummary } from './claude-code/summarize.js';
+import { normalizeSession } from './claude-code/normalize.js';
 
 async function ingestSlack(store: GraphStore) {
   const config = getSlackConfig();
@@ -283,6 +288,69 @@ async function ingestAppleCalendar(store: GraphStore) {
   console.log(`Apple Calendar: ingested ${normalized.length} events`);
 }
 
+async function ingestClaudeCode(store: GraphStore) {
+  const config = getClaudeCodeConfig();
+
+  if (!existsSync(config.projectsPath)) {
+    logger.info({ path: config.projectsPath }, 'Claude Code projects path not found — skipping');
+    return;
+  }
+
+  const backfillSince = new Date(
+    Date.now() - config.backfillDays * 86400 * 1000,
+  ).toISOString();
+
+  const projectDirs = discoverProjects(config.projectsPath);
+  let totalIngested = 0;
+
+  for (const projectDirName of projectDirs) {
+    const projectPath = `${config.projectsPath}/${projectDirName}`;
+    const cursorKey = projectDirName;
+    const cursor = await getCursor(store, 'claude-code', cursorKey);
+    const since = cursor ?? backfillSince;
+    const sinceDate = new Date(since);
+
+    const sessionFiles = listSessionFiles(projectPath);
+    let latestTs = since;
+
+    for (const { path: filePath, mtime } of sessionFiles) {
+      // Fast pre-filter: skip files not modified since cursor
+      if (mtime <= sinceDate) continue;
+
+      const session = parseSessionFile(filePath, projectDirName);
+      if (!session) continue;
+
+      // Skip sessions already ingested (by timestamp)
+      if (session.lastTimestamp <= since) continue;
+
+      // Summarize
+      let result;
+      if (config.anthropicApiKey) {
+        try {
+          result = await summarizeSession(session, config.anthropicApiKey);
+        } catch (err) {
+          logger.warn({ sessionId: session.sessionId, err }, 'LLM summarization failed, using fallback');
+          result = fallbackSummary(session);
+        }
+      } else {
+        result = fallbackSummary(session);
+      }
+
+      const normalized = normalizeSession(session, result, config.userName, config.topicAllowlist);
+      await upsertBatch(store, [normalized]);
+
+      if (session.lastTimestamp > latestTs) latestTs = session.lastTimestamp;
+      totalIngested++;
+    }
+
+    if (latestTs !== since) {
+      await setCursor(store, 'claude-code', cursorKey, latestTs);
+    }
+  }
+
+  console.log(`Claude Code: ingested ${totalIngested} sessions from ${projectDirs.length} projects`);
+}
+
 async function writeStatusFile(store: GraphStore, status: 'success' | 'error') {
   const [people, topics, containers, activities, cursorNodes] = await Promise.all([
     store.findNodes('Person', {}, { limit: 100000 }),
@@ -347,6 +415,15 @@ async function main() {
     sources.push({ name: 'Apple Calendar', fn: () => ingestAppleCalendar(store) });
   } else {
     logger.info('APPLE_CALDAV_USERNAME not set — skipping Apple Calendar ingestion');
+  }
+
+  // Claude Code: always enabled if projects path exists (local files, no token needed)
+  const ccProjectsPath = process.env.CLAUDE_CODE_PROJECTS_PATH
+    ?? `${process.env.HOME}/.claude/projects`;
+  if (existsSync(ccProjectsPath)) {
+    sources.push({ name: 'Claude Code', fn: () => ingestClaudeCode(store) });
+  } else {
+    logger.info('Claude Code projects path not found — skipping');
   }
 
   // Run all sources in parallel
