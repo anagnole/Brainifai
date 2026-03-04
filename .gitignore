@@ -3,3 +3,4 @@ dist/
 .env
 .claude
 tasks
+data/kuzu

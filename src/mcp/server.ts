@@ -3,6 +3,7 @@ import { registerSearchEntities } from './tools/search-entities.js';
 import { registerGetEntitySummary } from './tools/get-entity-summary.js';
 import { registerGetRecentActivity } from './tools/get-recent-activity.js';
 import { registerGetContextPacket } from './tools/get-context-packet.js';
+import { registerIngestMemory } from './tools/ingest-memory.js';
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -14,6 +15,7 @@ export function createServer(): McpServer {
   registerGetEntitySummary(server);
   registerGetRecentActivity(server);
   registerGetContextPacket(server);
+  registerIngestMemory(server);
 
   return server;
 }
