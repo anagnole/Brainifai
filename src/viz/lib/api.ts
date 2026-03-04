@@ -91,3 +91,9 @@ export async function fetchEntitySummary(
   if (!res.ok) return null;
   return res.json();
 }
+
+export async function fetchOverview(): Promise<Subgraph> {
+  const res = await fetch(`${BASE}/overview`);
+  if (!res.ok) return { nodes: [], edges: [] };
+  return res.json();
+}
