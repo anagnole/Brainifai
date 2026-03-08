@@ -1,7 +1,11 @@
+import { homedir } from 'os';
+import { resolve } from 'path';
 import type { GraphStore } from '../graphstore/types.js';
 import type { GraphStoreBackend } from '../graphstore/factory.js';
 import { createGraphStore } from '../graphstore/factory.js';
 import { logger } from './logger.js';
+
+const DEFAULT_KUZU_DB_PATH = resolve(homedir(), '.brainifai', 'data', 'kuzu');
 
 let store: GraphStore | null = null;
 
@@ -28,7 +32,7 @@ export async function getGraphStore(): Promise<GraphStore> {
     store = await createGraphStore({
       backend: 'kuzu',
       kuzu: {
-        dbPath: process.env.KUZU_DB_PATH ?? './data/kuzu',
+        dbPath: process.env.KUZU_DB_PATH ?? DEFAULT_KUZU_DB_PATH,
         readOnly,
         onDemand,
       },

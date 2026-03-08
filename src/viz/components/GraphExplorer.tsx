@@ -19,8 +19,7 @@ export function GraphExplorer() {
     const from = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
     return { from, to };
   });
-  // Counter to force re-render when graph changes
-  const [, setGraphVersion] = useState(0);
+  const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(true);
 
   // Load initial overview graph on mount
@@ -28,14 +27,18 @@ export function GraphExplorer() {
     (async () => {
       try {
         const subgraph = await fetchOverview();
+        console.log('[GraphExplorer] overview loaded:', subgraph.nodes.length, 'nodes');
         if (subgraph.nodes.length > 0) {
           mergeSubgraph(graph, subgraph);
           updateNodeSizes(graph);
           runLayout(graph);
-          setGraphVersion((v) => v + 1);
         }
+      } catch (err) {
+        console.error('[GraphExplorer] failed to load overview:', err);
       } finally {
         setLoading(false);
+        // Delay setting ready so Sigma creates after layout is done
+        setReady(true);
       }
     })();
   }, [graph]);
@@ -46,7 +49,6 @@ export function GraphExplorer() {
       mergeSubgraph(graph, subgraph);
       updateNodeSizes(graph);
       runLayout(graph);
-      setGraphVersion((v) => v + 1);
     },
     [graph],
   );
@@ -67,15 +69,9 @@ export function GraphExplorer() {
 
   const handleConnectionClick = useCallback(
     (name: string) => {
-      // Connections are identified by name; try to find in graph or expand
-      if (graph.hasNode(name)) {
-        handleNodeClick(name);
-      } else {
-        // Expand the connection
-        handleNodeClick(name);
-      }
+      handleNodeClick(name);
     },
-    [graph, handleNodeClick],
+    [handleNodeClick],
   );
 
   const handleTimeChange = useCallback((from: string, to: string) => {
@@ -105,17 +101,15 @@ export function GraphExplorer() {
           onChange={handleTimeChange}
         />
       </div>
-      <SigmaRenderer
-        graph={graph}
-        onNodeClick={handleNodeClick}
-        highlightedNodes={highlightedNodes}
-      />
-      {loading && (
-        <div className="loading-overlay">Loading graph...</div>
-      )}
-      {!loading && graph.order === 0 && (
-        <div className="empty-overlay">
-          Search for a person, topic, or channel to explore your knowledge graph
+      {ready ? (
+        <SigmaRenderer
+          graph={graph}
+          onNodeClick={handleNodeClick}
+          highlightedNodes={highlightedNodes}
+        />
+      ) : (
+        <div className="graph-canvas">
+          <div className="loading-overlay">Loading graph...</div>
         </div>
       )}
     </div>

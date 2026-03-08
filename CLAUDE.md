@@ -5,62 +5,67 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 Brainifai is a **Personal Knowledge Graph (PKG)** system with two pipelines:
-- **Ingestion**: Fetches data from tools (Slack MVP) → normalizes → upserts into Neo4j
+- **Ingestion**: Fetches data from tools (Slack, GitHub, ClickUp, Apple Calendar) → normalizes → upserts into Kuzu
 - **Serving**: MCP server exposes curated graph query tools to Claude/LLM clients
 
-**Stack**: TypeScript (ESM), Neo4j 5 (Docker), MCP SDK (stdio transport), Slack Web API
+**Stack**: TypeScript (ESM), Kuzu (embedded graph DB), MCP SDK (stdio transport), Slack Web API
+
+## Data Location
+
+Brainifai uses a **single global Kuzu database** at `~/.brainifai/data/kuzu`.
+Override with `KUZU_DB_PATH` env var.
+
+### What's global (all Claude sessions):
+- MCP server (search, context, ingest) — via `~/.claude/settings.json`
+- PreToolUse hook (KG context enrichment) — via `~/.claude/settings.json`
+- `/remember` skill — via `~/.claude/skills/remember/`
+- Kuzu database — single instance at `~/.brainifai/data/kuzu`
+
+### What's per-project:
+- `.mcp.json` — additional MCP servers (fal, clickup, figma)
+- `.claude/settings.local.json` — permission allowlists
+- Ingestion cursors — stored in the graph, not local files
 
 ## Commands
 
 ```bash
-docker compose up -d              # Start Neo4j (bolt://localhost:7687, browser at :7474)
-npm run test-connection           # Verify Neo4j connectivity
-npm run schema                    # Create/update Neo4j constraints and indexes
-npm run ingest                    # Run Slack ingestion (fetches new messages, upserts to graph)
+npm run ingest                    # Run ingestion (fetches new data, upserts to graph)
 npm run mcp                       # Start MCP server (stdio transport, for Claude Desktop)
+npm run schema                    # Create/update graph constraints and indexes
+npm run test-connection           # Verify graph DB connectivity
 npx tsc --noEmit                  # Type check
 ```
 
 ## Architecture
 
 ```
-src/shared/       → Neo4j driver singleton, canonical types, schema, constants
-src/ingestion/    → Slack connector, normalize, topic extraction, MERGE-based upsert, cursor
-src/mcp/          → MCP server, 4 tools (search_entities, get_entity_summary,
-                    get_recent_activity, get_context_packet), backing Cypher queries, safety
+src/shared/       → GraphStore singleton, canonical types, schema, constants
+src/graphstore/   → Kuzu + Neo4j backends, factory, on-demand wrapper
+src/ingestion/    → Slack/GitHub/ClickUp/Calendar connectors, normalize, upsert, cursor
+src/mcp/          → MCP server, 5 tools (search_entities, get_entity_summary,
+                    get_recent_activity, get_context_packet, ingest_memory)
+src/hooks/        → PreToolUse enricher (KG context injection)
+src/api/          → Fastify API server for graph visualization
+src/viz/          → React + Sigma.js graph visualization UI
 src/scripts/      → One-off utilities (test-connection, seed-schema)
 ```
 
-**Data model**: Entities (Person, Topic, Container) + Activities (Message) connected by typed relationships. All writes use MERGE for idempotency. Cursors stored as Neo4j `:Cursor` nodes.
+**Data model**: Entities (Person, Topic, Container) + Activities (Message) connected by typed relationships. All writes use MERGE for idempotency. Cursors stored as graph `:Cursor` nodes.
 
 **MCP tools**: `get_context_packet` is the primary tool — given a query, it resolves anchors via fulltext search, gathers structural facts, collects time-windowed evidence, and returns a bounded context payload.
 
 ## Key Design Decisions
 
 - All ingestion uses `MERGE` — safe to re-run, no duplicates
-- Cursors in Neo4j (not local files) — wipe DB = clean re-backfill
+- Cursors in graph DB (not local files) — wipe DB = clean re-backfill
 - MCP exposes curated tools only, no raw Cypher to the LLM
 - Safety limits enforced: MAX_EVIDENCE=20, MAX_TOTAL_CHARS=8000, QUERY_TIMEOUT=10s
-- Slack ts stored as string on Cursor nodes (preserves precision); ISO 8601 on Activity nodes
+- Single global DB at `~/.brainifai/data/kuzu` — all sessions share the same knowledge
+- OnDemand graph store for MCP/hooks — avoids write lock contention with ingestion
 
 ## Environment Variables (see .env.example)
 
-`NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_IDS`, `BACKFILL_DAYS`, `TOPIC_ALLOWLIST`
-
-## MCP Client Configuration (Claude Desktop)
-
-```json
-{
-  "mcpServers": {
-    "brainifai": {
-      "command": "npx",
-      "args": ["tsx", "src/mcp/index.ts"],
-      "cwd": "/path/to/Brainifai",
-      "env": { "NEO4J_URI": "bolt://localhost:7687", "NEO4J_USER": "neo4j", "NEO4J_PASSWORD": "..." }
-    }
-  }
-}
-```
+`KUZU_DB_PATH`, `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_IDS`, `GITHUB_TOKEN`, `GITHUB_REPOS`, `CLICKUP_TOKEN`, `CLICKUP_LIST_IDS`, `BACKFILL_DAYS`, `TOPIC_ALLOWLIST`
 
 ## Workflow Orchestration
 ### 1. Plan Node Default

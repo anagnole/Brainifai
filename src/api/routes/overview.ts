@@ -1,68 +1,87 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { getGraphStore } from '../../shared/graphstore.js';
+import type { SubgraphNode, SubgraphEdge } from '../../graphstore/types.js';
 
 /**
- * Returns seed entities for the initial graph view.
- * Fetches a few Person and Topic nodes, then expands their neighborhoods.
+ * Returns the full graph: all People, Topics, Containers, and their
+ * Activity connections.
  */
 export const overviewRoute: FastifyPluginAsync = async (app) => {
   app.get('/overview', async () => {
     const store = await getGraphStore();
 
-    // Get a handful of people and topics to seed the graph
-    const [people, topics] = await Promise.all([
-      store.findNodes('Person', {}, { limit: 5 }),
-      store.findNodes('Topic', {}, { limit: 5 }),
+    // Fetch all entity nodes
+    const [people, topics, containers] = await Promise.all([
+      store.findNodes('Person', {}, { limit: 500 }),
+      store.findNodes('Topic', {}, { limit: 500 }),
+      store.findNodes('Container', {}, { limit: 500 }),
     ]);
 
-    // Build seed list for neighborhood expansion
-    const seeds: Array<{ label: string; key: Record<string, unknown> }> = [];
+    const nodes: SubgraphNode[] = [];
+    const nodeIds = new Set<string>();
+    const edges: SubgraphEdge[] = [];
+    const edgeKeys = new Set<string>();
+
+    // Seed list for neighborhood expansion
+    const seeds: Array<{ label: string; key: Record<string, unknown>; id: string }> = [];
 
     for (const p of people) {
-      const pk = p.properties.person_key;
-      if (pk) seeds.push({ label: 'Person', key: { person_key: pk } });
+      const id = p.properties.person_key as string;
+      if (id && !nodeIds.has(id)) {
+        nodes.push({ id, type: 'Person', name: (p.properties.display_name as string) ?? id });
+        nodeIds.add(id);
+        seeds.push({ label: 'Person', key: { person_key: id }, id });
+      }
     }
     for (const t of topics) {
-      const name = t.properties.name;
-      if (name) seeds.push({ label: 'Topic', key: { name } });
+      const id = t.properties.name as string;
+      if (id && !nodeIds.has(id)) {
+        nodes.push({ id, type: 'Topic', name: id });
+        nodeIds.add(id);
+        seeds.push({ label: 'Topic', key: { name: id }, id });
+      }
+    }
+    for (const c of containers) {
+      const src = c.properties.source as string;
+      const cid = c.properties.container_id as string;
+      const id = `${src}:${cid}`;
+      if (!nodeIds.has(id)) {
+        nodes.push({ id, type: 'Container', name: (c.properties.name as string) ?? id });
+        nodeIds.add(id);
+        seeds.push({ label: 'Container', key: { container_id: cid, source: src }, id });
+      }
     }
 
     if (seeds.length === 0) {
       return { nodes: [], edges: [] };
     }
 
-    // Expand the first seed to get a connected subgraph
-    const subgraph = await store.neighborhood(seeds[0].label, seeds[0].key, {
-      maxNodes: 40,
-      maxEdges: 80,
-    });
+    // Expand each entity — merge ALL returned nodes and edges (including Activities)
+    for (const seed of seeds) {
+      try {
+        const sub = await store.neighborhood(seed.label, seed.key, {
+          maxNodes: 200,
+          maxEdges: 400,
+        });
 
-    // If we got a decent graph from the first seed, merge a second
-    if (seeds.length > 1 && subgraph.nodes.length < 20) {
-      const sub2 = await store.neighborhood(seeds[1].label, seeds[1].key, {
-        maxNodes: 30,
-        maxEdges: 60,
-      });
-      // Merge nodes
-      const nodeIds = new Set(subgraph.nodes.map((n) => n.id));
-      for (const n of sub2.nodes) {
-        if (!nodeIds.has(n.id)) {
-          subgraph.nodes.push(n);
-          nodeIds.add(n.id);
+        for (const n of sub.nodes) {
+          if (!nodeIds.has(n.id)) {
+            nodes.push(n);
+            nodeIds.add(n.id);
+          }
         }
-      }
-      // Merge edges
-      const edgeKeys = new Set(
-        subgraph.edges.map((e) => `${e.source}-${e.type}-${e.target}`),
-      );
-      for (const e of sub2.edges) {
-        const key = `${e.source}-${e.type}-${e.target}`;
-        if (!edgeKeys.has(key)) {
-          subgraph.edges.push(e);
+        for (const e of sub.edges) {
+          const ek = `${e.source}-${e.type}-${e.target}`;
+          if (!edgeKeys.has(ek)) {
+            edges.push(e);
+            edgeKeys.add(ek);
+          }
         }
+      } catch {
+        // Skip
       }
     }
 
-    return subgraph;
+    return { nodes, edges };
   });
 };

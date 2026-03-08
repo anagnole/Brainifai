@@ -14,5 +14,5 @@ export function runLayout(graph: Graph, iterations = 100): void {
     },
   });
 
-  noverlap.assign(graph, { maxIterations: 50, ratio: 1.5 });
+  noverlap.assign(graph, { maxIterations: 50 });
 }

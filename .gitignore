@@ -4,3 +4,4 @@ dist/
 .claude
 tasks
 data/kuzu
+logs
