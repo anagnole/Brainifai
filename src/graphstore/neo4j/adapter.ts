@@ -680,6 +680,7 @@ export class Neo4jGraphStore implements GraphStore {
     personKey?: string;
     topic?: string;
     containerId?: string;
+    kinds?: string[];
     since?: string;
     limit?: number;
   }): Promise<TimelineItem[]> {
@@ -704,6 +705,10 @@ export class Neo4jGraphStore implements GraphStore {
       if (opts.containerId) {
         filters.push('c.container_id = $containerId');
         params.containerId = opts.containerId;
+      }
+      if (opts.kinds && opts.kinds.length > 0) {
+        filters.push('a.kind IN $kinds');
+        params.kinds = opts.kinds;
       }
 
       const whereClause = filters.length > 0 ? 'WHERE ' + filters.join(' AND ') : '';

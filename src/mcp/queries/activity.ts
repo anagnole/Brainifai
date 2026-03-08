@@ -18,6 +18,7 @@ export async function getRecentActivity(opts: {
   personKey?: string;
   topic?: string;
   containerId?: string;
+  kinds?: string[];
   windowDays?: number;
   limit?: number;
 }): Promise<ActivityItem[]> {
@@ -37,6 +38,7 @@ export async function getRecentActivity(opts: {
     personKey: opts.personKey,
     topic: opts.topic,
     containerId,
+    kinds: opts.kinds,
     since: windowStart,
     limit,
   });

@@ -685,6 +685,7 @@ export class KuzuGraphStore implements GraphStore {
     personKey?: string;
     topic?: string;
     containerId?: string;
+    kinds?: string[];
     since?: string;
     limit?: number;
   }): Promise<TimelineItem[]> {
@@ -703,6 +704,11 @@ export class KuzuGraphStore implements GraphStore {
     if (opts.containerId) {
       filters.push('c.container_id = $containerId');
       params.containerId = opts.containerId;
+    }
+    if (opts.kinds && opts.kinds.length > 0) {
+      // Kuzu doesn't support parameterized lists in IN, so inline safely
+      const escaped = opts.kinds.map((k) => k.replace(/'/g, "''"));
+      filters.push(`a.kind IN ['${escaped.join("','")}']`);
     }
 
     const whereClause = filters.length > 0 ? 'WHERE ' + filters.join(' AND ') : '';

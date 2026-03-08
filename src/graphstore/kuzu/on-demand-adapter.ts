@@ -103,6 +103,7 @@ export class OnDemandKuzuGraphStore implements GraphStore {
     personKey?: string;
     topic?: string;
     containerId?: string;
+    kinds?: string[];
     since?: string;
     limit?: number;
   }): Promise<TimelineItem[]> {
