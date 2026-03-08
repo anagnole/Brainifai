@@ -5,9 +5,10 @@ import { NODE_COLORS } from './colors';
 export function mergeSubgraph(graph: Graph, subgraph: Subgraph): void {
   for (const node of subgraph.nodes) {
     if (!graph.hasNode(node.id)) {
+      const label = node.name.length > 20 ? node.name.slice(0, 20) + '...' : node.name;
       graph.addNode(node.id, {
-        label: node.name,
-        type: node.type,
+        label,
+        entityType: node.type,
         color: NODE_COLORS[node.type] ?? '#999',
         size: 8,
         x: Math.random() * 100,
@@ -22,7 +23,6 @@ export function mergeSubgraph(graph: Graph, subgraph: Subgraph): void {
       try {
         graph.addEdgeWithKey(edgeKey, edge.source, edge.target, {
           label: edge.type,
-          type: 'arrow',
         });
       } catch {
         // Skip if source/target node missing
