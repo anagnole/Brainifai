@@ -238,10 +238,19 @@ export class KuzuGraphStore implements GraphStore {
 
     const safeQuery = opts.query.replace(/'/g, "''");
 
+    // Topic tier filter: default to 'semantic' (exclude ephemeral unless requested)
+    const topicTier = opts.topicTier ?? 'semantic';
+
     for (const t of filteredTables) {
       try {
+        // For Topic table, apply tier filter unless 'all' is requested
+        const tierFilter = t.type === 'Topic' && topicTier !== 'all'
+          ? `WHERE node.tier = '${topicTier}'`
+          : '';
+
         const rows = await this.query(
           `CALL QUERY_FTS_INDEX('${t.table}', '${t.index}', '${safeQuery}')
+           ${tierFilter}
            RETURN ${t.idExpr} AS id, '${t.type}' AS type, ${t.nameExpr} AS name, score
            ORDER BY score DESC
            LIMIT ${limit}`,
@@ -724,7 +733,8 @@ export class KuzuGraphStore implements GraphStore {
               a.snippet AS snippet,
               a.url AS url,
               coalesce(p.display_name, p.person_key) AS actor,
-              c.name AS channel
+              c.name AS channel,
+              a.message_count AS message_count
        ORDER BY a.timestamp DESC
        LIMIT ${limit}`,
       params,
@@ -738,6 +748,7 @@ export class KuzuGraphStore implements GraphStore {
       url: (r.url as string) ?? undefined,
       actor: r.actor as string,
       channel: r.channel as string,
+      message_count: (r.message_count as number) || undefined,
     }));
   }
 

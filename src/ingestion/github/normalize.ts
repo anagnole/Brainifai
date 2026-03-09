@@ -32,7 +32,12 @@ export function normalizeGitHubPR(
   // Extract topics from body + labels
   const labelTopics = pr.labels.map((l) => l.name.toLowerCase());
   const annotations = extractAnnotations(text, allowlist);
-  const topics = [...new Set([...labelTopics, ...annotations.topics])].map((name) => ({ name }));
+  const semanticSet = new Set(annotations.topics);
+  const allTopicNames = [...new Set([...labelTopics, ...annotations.topics])];
+  const topics = allTopicNames.map((name) => ({
+    name,
+    tier: semanticSet.has(name) ? 'semantic' as const : 'ephemeral' as const,
+  }));
 
   // Convert GitHub @mentions to person keys
   const ghMentions = extractGitHubMentions(text);
@@ -76,7 +81,7 @@ export function normalizeGitHubComment(
   const snippet = truncate(comment.body ?? '');
   const personKey = `github:${comment.user.login}`;
   const annotations = extractAnnotations(comment.body ?? '', allowlist);
-  const topics = annotations.topics.map((name) => ({ name }));
+  const topics = annotations.topics.map((name) => ({ name, tier: 'semantic' as const }));
 
   // PR comment parent: derive PR source_id from the pull_request_url
   const prNumber = extractPrNumberFromUrl(comment.pull_request_url);
@@ -132,7 +137,7 @@ export function normalizeGitHubReview(
   const snippet = truncate(text);
   const personKey = `github:${review.user.login}`;
   const annotations = extractAnnotations(body, allowlist);
-  const topics = annotations.topics.map((name) => ({ name }));
+  const topics = annotations.topics.map((name) => ({ name, tier: 'semantic' as const }));
 
   const ghMentions = extractGitHubMentions(body);
   const mentions = ghMentions.map((login) => `github:${login}`);

@@ -12,9 +12,11 @@ export function registerSearchEntities(server: McpServer) {
         .describe('Filter by entity type(s)'),
       limit: z.number().int().min(1).max(50).default(10)
         .describe('Maximum results to return'),
+      include_ephemeral: z.boolean().default(false)
+        .describe('Include ephemeral topics (branch names, status values)'),
     },
-    async ({ query, types, limit }) => {
-      const results = await searchEntities(query, types, limit);
+    async ({ query, types, limit, include_ephemeral }) => {
+      const results = await searchEntities(query, types, limit, include_ephemeral);
       return {
         content: [{
           type: 'text' as const,

@@ -71,6 +71,7 @@ export async function upsertBatch(
         url: msg.activity.url ?? null,
         thread_ts: msg.activity.thread_ts ?? null,
         parent_source_id: msg.activity.parent_source_id ?? null,
+        message_count: msg.activity.message_count ?? 0,
         created_at: now,
         updated_at: now,
         valid_from: msg.activity.timestamp,
@@ -80,6 +81,7 @@ export async function upsertBatch(
     for (const topic of msg.topics) {
       topicsMap.set(topic.name, {
         name: topic.name,
+        tier: topic.tier ?? 'semantic',
         created_at: now,
         updated_at: now,
       });

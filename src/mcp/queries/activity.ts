@@ -9,6 +9,7 @@ export interface ActivityItem {
   kind: string;
   snippet: string;
   url?: string;
+  message_count?: number;
 }
 
 /**
@@ -49,6 +50,7 @@ export async function getRecentActivity(opts: {
     kind: i.kind,
     snippet: i.snippet,
     url: i.url,
+    message_count: i.message_count,
   }));
 
   return truncateEvidence(mapped, limit);

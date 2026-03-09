@@ -34,10 +34,13 @@ export function normalizeClickUpTask(
   const snippet = truncate(text);
   const personKey = `clickup:${task.creator.id}`;
 
-  // Include task status as a topic
+  // Include task status as a topic (ephemeral), allowlist matches as semantic
   const statusTopic = task.status?.status?.toLowerCase().replace(/\s+/g, '-');
   const annotations = extractAnnotations(text, allowlist);
-  const topics = [...new Set([...(statusTopic ? [statusTopic] : []), ...annotations.topics])].map((name) => ({ name }));
+  const topics = [
+    ...(statusTopic ? [{ name: statusTopic, tier: 'ephemeral' as const }] : []),
+    ...annotations.topics.map((name) => ({ name, tier: 'semantic' as const })),
+  ];
 
   return {
     activity: {
@@ -80,7 +83,7 @@ export function normalizeClickUpComment(
   const snippet = truncate(comment.comment_text);
   const personKey = `clickup:${comment.user.id}`;
   const annotations = extractAnnotations(comment.comment_text, allowlist);
-  const topics = annotations.topics.map((name) => ({ name }));
+  const topics = annotations.topics.map((name) => ({ name, tier: 'semantic' as const }));
 
   return {
     activity: {
@@ -145,8 +148,8 @@ export function normalizeClickUpStatusChange(
       linked_person_key: personKey,
     },
     topics: [
-      { name: activityItem.before.toLowerCase().replace(/\s+/g, '-') },
-      { name: activityItem.after.toLowerCase().replace(/\s+/g, '-') },
+      { name: activityItem.before.toLowerCase().replace(/\s+/g, '-'), tier: 'ephemeral' as const },
+      { name: activityItem.after.toLowerCase().replace(/\s+/g, '-'), tier: 'ephemeral' as const },
     ],
   };
 }
@@ -154,6 +157,7 @@ export function normalizeClickUpStatusChange(
 export function normalizeClickUpDoc(
   doc: ClickUpDoc,
   workspaceId: string,
+  workspaceName: string,
   allowlist: string[],
 ): NormalizedMessage | null {
   if (!doc.creator) return null;
@@ -162,7 +166,7 @@ export function normalizeClickUpDoc(
   const snippet = truncate(text);
   const personKey = `clickup:${doc.creator}`;
   const annotations = extractAnnotations(text, allowlist);
-  const topics = annotations.topics.map((name) => ({ name }));
+  const topics = annotations.topics.map((name) => ({ name, tier: 'semantic' as const }));
 
   return {
     activity: {
@@ -182,7 +186,7 @@ export function normalizeClickUpDoc(
     container: {
       source: 'clickup',
       container_id: workspaceId,
-      name: 'ClickUp Workspace',
+      name: workspaceName,
       kind: 'workspace',
     },
     account: {

@@ -27,17 +27,17 @@ export function getClickUpClient(token: string): ClickUpClient {
   return { get };
 }
 
-export async function verifyAuth(client: ClickUpClient): Promise<{ userId: string; workspaceId: string }> {
+export async function verifyAuth(client: ClickUpClient): Promise<{ userId: string; workspaceId: string; workspaceName: string }> {
   const data = await client.get('/user') as { user: { id: number; username: string }; teams?: Array<{ id: string }> };
   const user = data.user;
 
-  // Get workspace (team) id
+  // Get workspace (team) id and name
   const teams = await client.get('/team') as { teams: Array<{ id: string; name: string }> };
-  const workspaceId = teams.teams[0]?.id;
-  if (!workspaceId) throw new Error('No ClickUp workspace found');
+  const workspace = teams.teams[0];
+  if (!workspace?.id) throw new Error('No ClickUp workspace found');
 
-  logger.info({ username: user.username, workspaceId }, 'ClickUp auth verified');
-  return { userId: String(user.id), workspaceId };
+  logger.info({ username: user.username, workspaceId: workspace.id }, 'ClickUp auth verified');
+  return { userId: String(user.id), workspaceId: workspace.id, workspaceName: workspace.name };
 }
 
 export async function getListInfo(

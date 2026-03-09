@@ -14,7 +14,13 @@ export async function searchEntities(
   query: string,
   types?: string[],
   limit: number = 10,
+  includeEphemeral: boolean = false,
 ): Promise<SearchResult[]> {
   const store = await getGraphStore();
-  return store.search({ query, types, limit });
+  return store.search({
+    query,
+    types,
+    limit,
+    topicTier: includeEphemeral ? 'all' : 'semantic',
+  });
 }
