@@ -2,6 +2,7 @@ import kuzu from 'kuzu';
 import { resolve } from 'path';
 import { GLOBAL_BRAINIFAI_PATH } from './resolve.js';
 import type { InstanceRegistryEntry } from './types.js';
+import { emitInstanceRegistered, emitInstanceUpdated, emitInstanceRemoved } from '../event-bus/helpers.js';
 
 /** Ensure the Instance table and PARENT_OF rel exist (idempotent) */
 async function ensureSchema(conn: InstanceType<typeof kuzu.Connection>): Promise<void> {
@@ -98,6 +99,8 @@ export async function registerWithGlobal(
     conn.close();
     db.close();
   }
+
+  await emitInstanceRegistered(name, { name, type, description, path: instancePath, parent: 'global' });
 }
 
 /** Mark an instance as removed in the global registry */
@@ -111,6 +114,7 @@ export async function unregisterInstance(name: string): Promise<boolean> {
       SET n.status = 'removed', n.updated_at = $updated_at
     `);
     await conn.execute(ps, { name, updated_at: new Date().toISOString() });
+    await emitInstanceRemoved(name, { name });
     return true;
   } catch {
     return false;
@@ -135,6 +139,8 @@ export async function syncDescription(name: string, description: string): Promis
     conn.close();
     db.close();
   }
+
+  await emitInstanceUpdated(name, { name, fields: { description } });
 }
 
 /** List all registered instances from global graph */
