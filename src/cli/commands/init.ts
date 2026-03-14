@@ -25,26 +25,30 @@ export function initCommand(): Command {
           process.exitCode = 1;
         }
       } else {
-        // Project init — interactive prompts if flags not provided
-        const rl = createInterface({ input: process.stdin, output: process.stdout });
+        // Project init — only prompt interactively for missing fields
+        const needsPrompt = !opts.name || !opts.type;
+        let rl: ReturnType<typeof createInterface> | null = null;
 
         try {
+          if (needsPrompt && process.stdin.isTTY) {
+            rl = createInterface({ input: process.stdin, output: process.stdout });
+          }
+
           const name = opts.name ?? (
-            await rl.question(`Instance name [${basename(process.cwd())}]: `)
-            || basename(process.cwd())
+            rl
+              ? (await rl.question(`Instance name [${basename(process.cwd())}]: `) || basename(process.cwd()))
+              : basename(process.cwd())
           );
 
           const type = opts.type ?? (
-            await rl.question(`Instance type (${listTemplateNames().join(', ')}) [coding]: `)
-            || 'coding'
+            rl
+              ? (await rl.question(`Instance type (${listTemplateNames().join(', ')}) [coding]: `) || 'coding')
+              : 'coding'
           );
 
-          const description = opts.description ?? (
-            await rl.question('Description (press Enter to auto-generate): ')
-            || undefined  // undefined triggers auto-generation
-          );
+          const description = opts.description; // undefined triggers auto-generation
 
-          rl.close();
+          rl?.close();
 
           const path = await initProjectInstance({
             name,
@@ -54,7 +58,7 @@ export function initCommand(): Command {
           });
           console.log(`✓ Project instance "${name}" created at ${path}`);
         } catch (err) {
-          rl.close();
+          rl?.close();
           console.error(`Error: ${(err as Error).message}`);
           process.exitCode = 1;
         }
