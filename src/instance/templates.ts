@@ -15,7 +15,11 @@ export const TEMPLATES: Record<string, InstanceTemplate> = {
       { source: 'github', enabled: true },
       { source: 'claude-code', enabled: true },
     ],
-    contextFunctions: ['get_context_packet', 'search_entities', 'get_entity_summary', 'get_recent_activity'],
+    contextFunctions: [
+      'get_context_packet', 'search_entities', 'get_entity_summary',
+      'get_recent_activity',
+      'get_pr_summary', 'get_decision_log',
+    ],
   },
   manager: {
     type: 'manager',
@@ -25,7 +29,11 @@ export const TEMPLATES: Record<string, InstanceTemplate> = {
       { source: 'apple-calendar', enabled: true },
       { source: 'clickup', enabled: true },
     ],
-    contextFunctions: ['get_context_packet', 'search_entities', 'get_entity_summary', 'get_recent_activity'],
+    contextFunctions: [
+      'get_context_packet', 'search_entities', 'get_entity_summary',
+      'get_recent_activity',
+      'get_people_context', 'get_meeting_summary',
+    ],
   },
   general: {
     type: 'general',

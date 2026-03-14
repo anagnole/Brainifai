@@ -1,5 +1,6 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createServer } from './server.js';
+import { resolveMcpContext } from './instance-context.js';
 import { getGraphStore, closeGraphStore } from '../shared/graphstore.js';
 import { logger } from '../shared/logger.js';
 import { initEventBus, closeEventBus } from '../event-bus/index.js';
@@ -10,18 +11,23 @@ async function main() {
   // This allows ingest_memory (and batch ingestion) to open write connections.
   process.env.GRAPHSTORE_ON_DEMAND = 'true';
 
+  // Resolve instance context before anything else
+  const ctx = resolveMcpContext();
+
   // Initialize GraphStore so queries are ready
   const store = await getGraphStore();
   await store.initialize();
 
   // Initialize event bus and register global subscriptions
   const bus = await initEventBus();
-  registerGlobalSubscriptions(bus);
+  registerGlobalSubscriptions(bus, ctx?.instanceName);
 
-  const server = createServer();
+  const server = await createServer(ctx);
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  logger.info('Brainifai MCP server started (stdio transport)');
+
+  const instanceLabel = ctx ? `${ctx.instanceName} (${ctx.instanceType})` : 'global (default)';
+  logger.info(`Brainifai MCP server started — instance: ${instanceLabel}`);
 }
 
 main().catch(async (err) => {
