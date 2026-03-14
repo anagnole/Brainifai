@@ -90,6 +90,19 @@ export const KUZU_NODE_TABLES = [
     updated_at STRING,
     PRIMARY KEY (container_id)
   )`,
+
+  // Instance registry (global DB only — tracks child instances)
+  `CREATE NODE TABLE IF NOT EXISTS Instance (
+    name STRING,
+    type STRING,
+    description STRING,
+    path STRING,
+    parent STRING,
+    status STRING DEFAULT 'active',
+    created_at STRING,
+    updated_at STRING,
+    PRIMARY KEY (name)
+  )`,
 ];
 
 export const KUZU_REL_TABLES = [
@@ -100,6 +113,9 @@ export const KUZU_REL_TABLES = [
   `CREATE REL TABLE IF NOT EXISTS MENTIONS (FROM Activity TO Topic, timestamp STRING)`,
   `CREATE REL TABLE IF NOT EXISTS REPLIES_TO (FROM Activity TO Activity, timestamp STRING)`,
   `CREATE REL TABLE IF NOT EXISTS MENTIONS_PERSON (FROM Activity TO Person, timestamp STRING)`,
+
+  // Instance hierarchy (global DB only)
+  `CREATE REL TABLE IF NOT EXISTS PARENT_OF (FROM Instance TO Instance)`,
 ];
 
 /** Map from our logical rel type to Kuzu's table name (since FROM/IN are reserved). */
@@ -111,6 +127,7 @@ export const REL_TYPE_MAP: Record<string, string> = {
   MENTIONS: 'MENTIONS',
   REPLIES_TO: 'REPLIES_TO',
   MENTIONS_PERSON: 'MENTIONS_PERSON',
+  PARENT_OF: 'PARENT_OF',
 };
 
 /**
@@ -123,6 +140,7 @@ export const KUZU_FTS_INDEXES = [
   `CALL CREATE_FTS_INDEX('Topic', 'topic_fts', ['name'])`,
   `CALL CREATE_FTS_INDEX('Container', 'container_fts', ['name'])`,
   `CALL CREATE_FTS_INDEX('Activity', 'activity_fts', ['snippet', 'kind'])`,
+  `CALL CREATE_FTS_INDEX('Instance', 'instance_fts', ['name', 'description'])`,
 ];
 
 export const KUZU_FTS_DROP = [
@@ -130,4 +148,5 @@ export const KUZU_FTS_DROP = [
   `CALL DROP_FTS_INDEX('Topic', 'topic_fts')`,
   `CALL DROP_FTS_INDEX('Container', 'container_fts')`,
   `CALL DROP_FTS_INDEX('Activity', 'activity_fts')`,
+  `CALL DROP_FTS_INDEX('Instance', 'instance_fts')`,
 ];

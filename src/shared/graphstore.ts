@@ -1,48 +1,43 @@
-import { homedir } from 'os';
 import { resolve } from 'path';
 import type { GraphStore } from '../graphstore/types.js';
-import type { GraphStoreBackend } from '../graphstore/factory.js';
 import { createGraphStore } from '../graphstore/factory.js';
+import { resolveInstanceDbPath, GLOBAL_BRAINIFAI_PATH } from '../instance/resolve.js';
 import { logger } from './logger.js';
 
-const DEFAULT_KUZU_DB_PATH = resolve(homedir(), '.brainifai', 'data', 'kuzu');
-
 let store: GraphStore | null = null;
+let storeDbPath: string | null = null;
 
-/** Get or create the singleton GraphStore, configured from env vars. */
-export async function getGraphStore(): Promise<GraphStore> {
-  if (store) return store;
+/** Get or create the singleton GraphStore, configured from env vars or instance context. */
+export async function getGraphStore(forDbPath?: string): Promise<GraphStore> {
+  const targetPath = forDbPath ?? resolveInstanceDbPath();
 
-  const backend = (process.env.GRAPHSTORE_BACKEND ?? 'kuzu') as GraphStoreBackend;
-
-  if (backend === 'neo4j') {
-    const password = process.env.NEO4J_PASSWORD;
-    if (!password) throw new Error('NEO4J_PASSWORD environment variable is required');
-    store = await createGraphStore({
-      backend: 'neo4j',
-      neo4j: {
-        uri: process.env.NEO4J_URI ?? 'bolt://localhost:7687',
-        user: process.env.NEO4J_USER ?? 'neo4j',
-        password,
-      },
-    });
-  } else if (backend === 'kuzu') {
-    const onDemand = process.env.GRAPHSTORE_ON_DEMAND === 'true';
-    const readOnly = onDemand || process.env.GRAPHSTORE_READONLY === 'true';
-    store = await createGraphStore({
-      backend: 'kuzu',
-      kuzu: {
-        dbPath: process.env.KUZU_DB_PATH ?? DEFAULT_KUZU_DB_PATH,
-        readOnly,
-        onDemand,
-      },
-    });
-  } else {
-    throw new Error(`Unknown GRAPHSTORE_BACKEND: ${backend}`);
+  // If singleton exists but for a different path, close it first
+  if (store && storeDbPath !== targetPath) {
+    await closeGraphStore();
   }
 
-  logger.info({ backend }, 'GraphStore singleton created');
+  if (store) return store;
+
+  const onDemand = process.env.GRAPHSTORE_ON_DEMAND === 'true';
+  const readOnly = onDemand || process.env.GRAPHSTORE_READONLY === 'true';
+
+  store = await createGraphStore({
+    kuzu: {
+      dbPath: targetPath,
+      readOnly,
+      onDemand,
+    },
+  });
+  storeDbPath = targetPath;
+
+  logger.info({ backend: 'kuzu', dbPath: targetPath }, 'GraphStore singleton created');
   return store;
+}
+
+/** Get a store that always points at the global instance DB */
+export async function getGlobalGraphStore(): Promise<GraphStore> {
+  const globalDbPath = resolve(GLOBAL_BRAINIFAI_PATH, 'data', 'kuzu');
+  return getGraphStore(globalDbPath);
 }
 
 /** Close the singleton and null it out. */
@@ -50,6 +45,7 @@ export async function closeGraphStore(): Promise<void> {
   if (store) {
     await store.close();
     store = null;
+    storeDbPath = null;
     logger.info('GraphStore singleton closed');
   }
 }
