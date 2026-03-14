@@ -10,6 +10,7 @@
     "test-connection": "tsx --env-file=.env src/scripts/test-connection.ts",
     "schema": "tsx --env-file=.env src/scripts/seed-schema.ts",
     "ingest": "tsx --env-file=.env src/ingestion/index.ts",
+    "orchestrate": "tsx --env-file=.env src/orchestrator/index.ts",
     "mcp": "tsx --env-file=.env src/mcp/index.ts",
     "launch": "bash scripts/launchagent.sh install",
     "launch:stop": "bash scripts/launchagent.sh uninstall",

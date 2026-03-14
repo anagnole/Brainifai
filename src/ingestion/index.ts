@@ -351,6 +351,288 @@ async function ingestClaudeCode(store: GraphStore) {
   console.log(`Claude Code: ingested ${totalIngested} sessions from ${projectDirs.length} projects`);
 }
 
+// ─── Collect-only variants (for orchestrator mode) ────────────────────────
+// These mirror the ingest* functions but return NormalizedMessages instead of upserting.
+
+async function collectSlack(store: GraphStore): Promise<NormalizedMessage[]> {
+  const config = getSlackConfig();
+  const slack = getSlackClient(config.token);
+  await verifyAuth(slack);
+
+  const collected: NormalizedMessage[] = [];
+
+  for (const channelId of config.channelIds) {
+    const channelInfo = await fetchChannelInfo(slack, channelId);
+    logger.info({ channel: channelInfo.name, id: channelId }, 'Collecting channel');
+
+    const cursor = await getCursor(store, 'slack', channelId);
+    const oldest = cursor ?? String((Date.now() / 1000) - config.backfillDays * 86400);
+    let latestTs = oldest;
+
+    for await (const page of fetchChannelHistory(slack, channelId, oldest)) {
+      for (const msg of page) {
+        const result = normalizeSlackMessage(msg, channelInfo, config.topicAllowlist);
+        if (result) {
+          collected.push(result);
+          if (msg.ts > latestTs) latestTs = msg.ts;
+        }
+      }
+    }
+
+    if (latestTs !== oldest) {
+      await setCursor(store, 'slack', channelId, latestTs);
+    }
+  }
+
+  return collected;
+}
+
+async function collectGitHub(store: GraphStore): Promise<NormalizedMessage[]> {
+  const config = getGitHubConfig();
+  const client = getGitHubClient(config.token);
+  await verifyGitHubAuth(client);
+
+  const backfillSince = new Date(Date.now() - config.backfillDays * 86400 * 1000).toISOString();
+  const collected: NormalizedMessage[] = [];
+
+  for (const repoFullName of config.repos) {
+    const [owner, repo] = repoFullName.split('/');
+
+    const prCursorKey = `${repoFullName}:prs`;
+    const prSince = (await getCursor(store, 'github', prCursorKey)) ?? backfillSince;
+    let latestPrTs = prSince;
+
+    for await (const page of fetchPRs(client, owner, repo, prSince)) {
+      for (const pr of page) {
+        const item = normalizeGitHubPR(pr, repoFullName, config.topicAllowlist);
+        if (item) {
+          collected.push(item);
+          if (pr.updated_at > latestPrTs) latestPrTs = pr.updated_at;
+        }
+
+        const reviews = await fetchPRReviews(client, owner, repo, pr.number);
+        for (const review of reviews) {
+          const reviewItem = normalizeGitHubReview(review, repoFullName, pr.number, config.topicAllowlist);
+          if (reviewItem) collected.push(reviewItem);
+        }
+      }
+    }
+
+    if (latestPrTs !== prSince) {
+      await setCursor(store, 'github', prCursorKey, latestPrTs);
+    }
+
+    const commentCursorKey = `${repoFullName}:comments`;
+    const commentSince = (await getCursor(store, 'github', commentCursorKey)) ?? backfillSince;
+    let latestCommentTs = commentSince;
+
+    for await (const page of fetchPRComments(client, owner, repo, commentSince)) {
+      for (const comment of page) {
+        const item = normalizeGitHubComment(comment, repoFullName, config.topicAllowlist);
+        if (item) {
+          collected.push(item);
+          if (comment.created_at > latestCommentTs) latestCommentTs = comment.created_at;
+        }
+      }
+    }
+
+    if (latestCommentTs !== commentSince) {
+      await setCursor(store, 'github', commentCursorKey, latestCommentTs);
+    }
+  }
+
+  return collected;
+}
+
+async function collectClickUp(store: GraphStore): Promise<NormalizedMessage[]> {
+  const config = getClickUpConfig();
+  const client = getClickUpClient(config.token);
+  const { workspaceId } = await verifyClickUpAuth(client);
+
+  const backfillSince = new Date(Date.now() - config.backfillDays * 86400 * 1000).toISOString();
+  const collected: NormalizedMessage[] = [];
+
+  for (const listId of config.listIds) {
+    const listInfo = await getListInfo(client, listId);
+    const taskCursorKey = `${listId}:tasks`;
+    const taskSince = (await getCursor(store, 'clickup', taskCursorKey)) ?? backfillSince;
+    let latestTaskTs = taskSince;
+    let activitySupported = true;
+
+    for await (const page of fetchTasks(client, listId, taskSince)) {
+      for (const task of page) {
+        const item = normalizeClickUpTask(task, listId, listInfo.name, config.topicAllowlist);
+        if (item) {
+          collected.push(item);
+          if (task.date_updated > latestTaskTs) latestTaskTs = task.date_updated;
+        }
+
+        const taskSourceId = `clickup:${listId}:task:${task.id}`;
+        const comments = await fetchComments(client, task.id);
+        for (const comment of comments) {
+          const commentItem = normalizeClickUpComment(comment, listId, listInfo.name, config.topicAllowlist, taskSourceId);
+          if (commentItem) collected.push(commentItem);
+        }
+
+        if (activitySupported) {
+          const activities = await fetchTaskActivity(client, task.id);
+          if (activities === null) {
+            activitySupported = false;
+          } else {
+            for (const activity of activities) {
+              const statusItem = normalizeClickUpStatusChange(activity, task, listId, listInfo.name);
+              if (statusItem) collected.push(statusItem);
+            }
+          }
+        }
+      }
+    }
+
+    if (latestTaskTs !== taskSince) {
+      await setCursor(store, 'clickup', taskCursorKey, latestTaskTs);
+    }
+  }
+
+  // Docs
+  try {
+    const docCursorKey = `${workspaceId}:docs`;
+    const docSince = (await getCursor(store, 'clickup', docCursorKey)) ?? backfillSince;
+    let latestDocTs = docSince;
+
+    for await (const page of fetchDocs(client, workspaceId)) {
+      for (const doc of page) {
+        const docTs = new Date(Number(doc.date_updated)).toISOString();
+        if (docTs <= docSince) continue;
+
+        const item = normalizeClickUpDoc(doc, workspaceId, config.topicAllowlist);
+        if (item) {
+          collected.push(item);
+          if (docTs > latestDocTs) latestDocTs = docTs;
+        }
+      }
+    }
+
+    if (latestDocTs !== docSince) {
+      await setCursor(store, 'clickup', docCursorKey, latestDocTs);
+    }
+  } catch (err) {
+    logger.warn({ err }, 'ClickUp Docs API unavailable — skipping docs collection');
+  }
+
+  return collected;
+}
+
+async function collectAppleCalendar(store: GraphStore): Promise<NormalizedMessage[]> {
+  const config = getAppleCalendarConfig();
+  const backfillSince = new Date(Date.now() - config.backfillDays * 86400 * 1000).toISOString();
+
+  const cursorKey = `${config.username}:calendars`;
+  const since = (await getCursor(store, 'apple-calendar', cursorKey)) ?? backfillSince;
+
+  const events = await fetchCalendarEvents(config.username, config.password, since, config.calendarFilter);
+
+  const collected: NormalizedMessage[] = [];
+  for (const event of events) {
+    const item = normalizeCalendarEvent(event, config.username, config.topicAllowlist);
+    if (item) collected.push(item);
+  }
+
+  await setCursor(store, 'apple-calendar', cursorKey, new Date().toISOString());
+  return collected;
+}
+
+async function collectClaudeCode(store: GraphStore): Promise<NormalizedMessage[]> {
+  const config = getClaudeCodeConfig();
+
+  if (!existsSync(config.projectsPath)) {
+    logger.info({ path: config.projectsPath }, 'Claude Code projects path not found — skipping');
+    return [];
+  }
+
+  const backfillSince = new Date(Date.now() - config.backfillDays * 86400 * 1000).toISOString();
+  const projectDirs = discoverProjects(config.projectsPath);
+  const collected: NormalizedMessage[] = [];
+
+  for (const projectDirName of projectDirs) {
+    const projectPath = `${config.projectsPath}/${projectDirName}`;
+    const cursorKey = projectDirName;
+    const cursor = await getCursor(store, 'claude-code', cursorKey);
+    const since = cursor ?? backfillSince;
+    const sinceDate = new Date(since);
+
+    const sessionFiles = listSessionFiles(projectPath);
+    let latestTs = since;
+
+    for (const { path: filePath, mtime } of sessionFiles) {
+      if (mtime <= sinceDate) continue;
+
+      const session = parseSessionFile(filePath, projectDirName);
+      if (!session) continue;
+      if (session.lastTimestamp <= since) continue;
+
+      let result;
+      if (config.anthropicApiKey) {
+        try {
+          result = await summarizeSession(session, config.anthropicApiKey);
+        } catch (err) {
+          logger.warn({ sessionId: session.sessionId, err }, 'LLM summarization failed, using fallback');
+          result = fallbackSummary(session);
+        }
+      } else {
+        result = fallbackSummary(session);
+      }
+
+      collected.push(normalizeSession(session, result, config.userName, config.topicAllowlist));
+      if (session.lastTimestamp > latestTs) latestTs = session.lastTimestamp;
+    }
+
+    if (latestTs !== since) {
+      await setCursor(store, 'claude-code', cursorKey, latestTs);
+    }
+  }
+
+  return collected;
+}
+
+/** Ingest from all sources and return normalized messages (no upsert). */
+export async function collectIngestion(store: GraphStore): Promise<NormalizedMessage[]> {
+  const sources: Array<{ name: string; fn: () => Promise<NormalizedMessage[]> }> = [];
+
+  if (process.env.SLACK_BOT_TOKEN) {
+    sources.push({ name: 'Slack', fn: () => collectSlack(store) });
+  }
+  if (process.env.GITHUB_TOKEN) {
+    sources.push({ name: 'GitHub', fn: () => collectGitHub(store) });
+  }
+  if (process.env.CLICKUP_TOKEN) {
+    sources.push({ name: 'ClickUp', fn: () => collectClickUp(store) });
+  }
+  if (process.env.APPLE_CALDAV_USERNAME) {
+    sources.push({ name: 'Apple Calendar', fn: () => collectAppleCalendar(store) });
+  }
+
+  const ccProjectsPath = process.env.CLAUDE_CODE_PROJECTS_PATH
+    ?? `${process.env.HOME}/.claude/projects`;
+  if (existsSync(ccProjectsPath)) {
+    sources.push({ name: 'Claude Code', fn: () => collectClaudeCode(store) });
+  }
+
+  const results = await Promise.allSettled(sources.map(s => s.fn()));
+  const all: NormalizedMessage[] = [];
+
+  for (let i = 0; i < sources.length; i++) {
+    const result = results[i];
+    if (result.status === 'fulfilled') {
+      all.push(...result.value);
+      logger.info({ source: sources[i].name, count: result.value.length }, 'Collected from source');
+    } else {
+      logger.error({ source: sources[i].name, err: result.reason }, 'Source collection failed');
+    }
+  }
+
+  return all;
+}
+
 async function writeStatusFile(store: GraphStore, status: 'success' | 'error') {
   const [people, topics, containers, activities, cursorNodes] = await Promise.all([
     store.findNodes('Person', {}, { limit: 100000 }),
