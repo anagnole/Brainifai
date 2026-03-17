@@ -11,18 +11,18 @@
     },
     "fal-images": {
       "command": "npx",
-      "args": ["tsx", "--env-file=.env", "src/mcp-fal/index.ts"],
-      "cwd": "/Users/anagnole/Projects/Brainifai"
+      "args": ["tsx", "--env-file=.env", "src/index.ts"],
+      "cwd": "/Users/anagnole/Projects/mcps/mcp-fal"
     },
     "clickup": {
       "command": "npx",
-      "args": ["tsx", "--env-file=.env", "src/mcp-clickup/index.ts"],
-      "cwd": "/Users/anagnole/Projects/Brainifai"
+      "args": ["tsx", "--env-file=.env", "src/index.ts"],
+      "cwd": "/Users/anagnole/Projects/mcps/mcp-clickup"
     },
     "figma-writer": {
       "command": "npx",
       "args": ["tsx", "src/index.ts"],
-      "cwd": "/Users/anagnole/Projects/figma-writer-mcp"
+      "cwd": "/Users/anagnole/Projects/mcps/mcp-figma-writer"
     }
   }
 }
