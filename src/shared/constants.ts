@@ -24,3 +24,8 @@ export const HOOK_PERSON_WINDOW_DAYS = 14;
 // Ingestion
 export const UPSERT_BATCH_SIZE = 100;
 export const SLACK_PAGE_SIZE = 200;
+
+// Orchestrator
+export const ORCHESTRATOR_BATCH_SIZE = 20;
+export const ORCHESTRATOR_MODEL = 'claude-haiku-4-5-20251001';
+export const ORCHESTRATOR_CONFIDENCE_THRESHOLD = 0.5;

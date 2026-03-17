@@ -2,7 +2,7 @@
 // All helpers are fire-and-forget: silently no-op if the bus isn't initialized.
 
 import { getEventBus } from './index.js';
-import type { InstanceRegisteredData, InstanceUpdatedData, InstanceRemovedData, QueryRequestData } from './messages.js';
+import type { InstanceRegisteredData, InstanceUpdatedData, InstanceRemovedData, QueryRequestData, DataPushData } from './messages.js';
 
 export async function emitInstanceRegistered(source: string, data: InstanceRegisteredData): Promise<void> {
   const bus = getEventBus();
@@ -36,4 +36,13 @@ export async function sendQueryResponse(
 ): Promise<void> {
   const bus = getEventBus();
   if (bus) await bus.publish({ kind: 'query.response', source, data, replyTo });
+}
+
+export async function emitDataPush(
+  source: string,
+  target: string,
+  data: DataPushData,
+): Promise<void> {
+  const bus = getEventBus();
+  if (bus) await bus.publish({ kind: 'data.push', source, target, data });
 }

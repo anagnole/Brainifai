@@ -183,6 +183,7 @@ export interface GraphStore {
     personKey?: string;
     topic?: string;
     containerId?: string;
+    containerName?: string;
     kinds?: string[];
     since?: string;
     limit?: number;

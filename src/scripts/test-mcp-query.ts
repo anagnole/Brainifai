@@ -16,7 +16,7 @@ async function main() {
   if (activity[0]) console.log('First:', JSON.stringify(activity[0], null, 2));
 
   // Test search
-  const results = await searchEntities({ query: 'mosaic', limit: 5 });
+  const results = await searchEntities('mosaic', undefined, 5);
   console.log('\nsearchEntities count:', results.length);
   if (results[0]) console.log('First:', JSON.stringify(results[0], null, 2));
 

@@ -18,6 +18,7 @@ export async function getRecentActivity(opts: {
   personKey?: string;
   topic?: string;
   containerId?: string;
+  containerName?: string;
   kinds?: string[];
   windowDays?: number;
   limit?: number;
@@ -38,6 +39,7 @@ export async function getRecentActivity(opts: {
     personKey: opts.personKey,
     topic: opts.topic,
     containerId,
+    containerName: opts.containerName,
     kinds: opts.kinds,
     since: windowStart,
     limit,

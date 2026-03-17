@@ -5,3 +5,5 @@ dist/
 tasks
 data/kuzu
 logs
+.flaio/
+.brainifai/

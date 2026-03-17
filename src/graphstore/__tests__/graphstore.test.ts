@@ -23,46 +23,17 @@ import {
   OWNS_EDGES,
 } from './fixtures.js';
 
-function getBackends(): Array<{ name: string; factory: () => GraphStore }> {
-  const backends: Array<{ name: string; factory: () => GraphStore }> = [];
-
-  // Kuzu — always available (embedded)
-  // Kuzu needs a non-existing path (it creates the directory itself)
+function createStore(): GraphStore {
   const tmpDir = mkdtempSync(join(tmpdir(), 'kuzu-test-'));
   const dbPath = join(tmpDir, 'test.db');
-  backends.push({
-    name: 'kuzu',
-    factory: () => new KuzuGraphStore({ dbPath }),
-  });
-
-  // Neo4j — only if credentials provided
-  if (process.env.NEO4J_PASSWORD) {
-    // Dynamically import to avoid requiring neo4j-driver for kuzu-only tests
-    backends.push({
-      name: 'neo4j',
-      factory: () => {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { Neo4jGraphStore } = require('../neo4j/adapter.js');
-        return new Neo4jGraphStore({
-          uri: process.env.NEO4J_URI ?? 'bolt://localhost:7687',
-          user: process.env.NEO4J_USER ?? 'neo4j',
-          password: process.env.NEO4J_PASSWORD!,
-        });
-      },
-    });
-  }
-
-  return backends;
+  return new KuzuGraphStore({ dbPath });
 }
 
-const backends = getBackends();
-
-for (const { name, factory } of backends) {
-  describe(`GraphStore [${name}]`, () => {
+describe('GraphStore [kuzu]', () => {
     let store: GraphStore;
 
     beforeAll(async () => {
-      store = factory();
+      store = createStore();
       await store.initialize();
 
       // Seed test data
@@ -256,4 +227,4 @@ for (const { name, factory } of backends) {
       expect(facts[0].activityCount).toBeGreaterThan(0);
     });
   });
-}
+

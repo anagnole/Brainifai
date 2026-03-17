@@ -685,6 +685,7 @@ export class KuzuGraphStore implements GraphStore {
     personKey?: string;
     topic?: string;
     containerId?: string;
+    containerName?: string;
     kinds?: string[];
     since?: string;
     limit?: number;
@@ -704,6 +705,10 @@ export class KuzuGraphStore implements GraphStore {
     if (opts.containerId) {
       filters.push('c.container_id = $containerId');
       params.containerId = opts.containerId;
+    }
+    if (opts.containerName) {
+      filters.push('c.name = $containerName');
+      params.containerName = opts.containerName;
     }
     if (opts.kinds && opts.kinds.length > 0) {
       // Kuzu doesn't support parameterized lists in IN, so inline safely
