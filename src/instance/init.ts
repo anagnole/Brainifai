@@ -50,8 +50,7 @@ export async function initGlobalInstance(opts: InitGlobalOptions = {}): Promise<
   // Initialize DB schema only if the DB doesn't already exist (migration path:
   // existing ~/.brainifai/data/kuzu from pre-instance era gets wrapped in config)
   if (!existsSync(dbPath)) {
-    mkdirSync(dbPath, { recursive: true });
-    await initializeInstanceDb(dbPath);
+    await initializeInstanceDb(dbPath, opts.type);
   }
 
   return GLOBAL_BRAINIFAI_PATH;
@@ -97,7 +96,7 @@ export async function initProjectInstance(opts: InitProjectOptions): Promise<str
   writeInstanceConfig(instancePath, config);
 
   // Initialize DB schema
-  await initializeInstanceDb(dbPath);
+  await initializeInstanceDb(dbPath, opts.type);
 
   // Register with global instance
   await registerWithGlobal(opts.name, opts.type, description, instancePath, now);

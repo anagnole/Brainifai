@@ -35,6 +35,20 @@ export const TEMPLATES: Record<string, InstanceTemplate> = {
       'get_people_context', 'get_meeting_summary',
     ],
   },
+  ehr: {
+    type: 'ehr',
+    description: 'Clinical EHR instance with patient records, encounters, conditions, medications, labs, procedures, and providers. Designed for graph-based clinical QA evaluation.',
+    sources: [],
+    contextFunctions: [
+      'search_patients',
+      'get_patient_summary',
+      'get_medications',
+      'get_diagnoses',
+      'get_labs',
+      'get_temporal_relation',
+      'find_cohort',
+    ],
+  },
   general: {
     type: 'general',
     description: 'Broad instance — subscribes to all available sources',

@@ -1,6 +1,6 @@
 // ─── Instance types ──────────────────────────────────────────────────────────
 
-export type InstanceType = 'coding' | 'manager' | 'general' | string;
+export type InstanceType = 'coding' | 'manager' | 'general' | 'ehr' | string;
 
 export interface SourceSubscription {
   source: string;               // "slack", "github", "clickup", "apple-calendar", "claude-code"
