@@ -28,6 +28,7 @@ export interface SearchOptions {
   types?: string[];               // label filter (e.g. ["Person", "Topic"])
   minScore?: number;              // default 0.3
   limit?: number;                 // default 10
+  topicTier?: 'semantic' | 'ephemeral' | 'all';  // default 'semantic'
 }
 
 export interface SearchResult {
@@ -83,6 +84,7 @@ export interface TimelineItem {
   url?: string;
   actor: string;
   channel: string;
+  message_count?: number;
 }
 
 // ─── Entity Summary (convenience) ────────────────────────────────────────────

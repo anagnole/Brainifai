@@ -1,4 +1,5 @@
 import { logger } from '../../shared/logger.js';
+import { stripAnsi } from '../../shared/sanitize.js';
 import type { ParsedSession, SummarizeResult } from './types.js';
 
 const MAX_TRANSCRIPT_CHARS = 12000;
@@ -11,15 +12,15 @@ function buildTranscript(session: ParsedSession): string {
 
   // Interleave user/assistant messages
   for (let i = 0; i < maxPerSide; i++) {
-    parts.push(`User: ${session.userMessages[i]}`);
-    parts.push(`Assistant: ${session.assistantMessages[i]}`);
+    parts.push(`User: ${stripAnsi(session.userMessages[i])}`);
+    parts.push(`Assistant: ${stripAnsi(session.assistantMessages[i])}`);
   }
   // Remaining messages from whichever side has more
   for (let i = maxPerSide; i < session.userMessages.length; i++) {
-    parts.push(`User: ${session.userMessages[i]}`);
+    parts.push(`User: ${stripAnsi(session.userMessages[i])}`);
   }
   for (let i = maxPerSide; i < session.assistantMessages.length; i++) {
-    parts.push(`Assistant: ${session.assistantMessages[i]}`);
+    parts.push(`Assistant: ${stripAnsi(session.assistantMessages[i])}`);
   }
 
   const full = parts.join('\n\n');
@@ -104,12 +105,12 @@ export function fallbackSummary(session: ParsedSession): SummarizeResult {
   parts.push(`${session.userMessages.length} user messages, ${session.assistantMessages.length} assistant messages.`);
 
   if (session.userMessages.length > 0) {
-    const first = session.userMessages[0].slice(0, 500);
+    const first = stripAnsi(session.userMessages[0]).slice(0, 500);
     parts.push(`\nFirst request: ${first}`);
   }
 
   if (session.userMessages.length > 1) {
-    const last = session.userMessages[session.userMessages.length - 1].slice(0, 300);
+    const last = stripAnsi(session.userMessages[session.userMessages.length - 1]).slice(0, 300);
     parts.push(`\nLast request: ${last}`);
   }
 

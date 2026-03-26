@@ -20,6 +20,7 @@ import { getAppleCalendarConfig } from './apple-calendar/config.js';
 import { fetchCalendarEvents } from './apple-calendar/client.js';
 import { normalizeCalendarEvent } from './apple-calendar/normalize.js';
 import { existsSync } from 'fs';
+import { linkPersons } from './person-linker.js';
 import { getClaudeCodeConfig } from './claude-code/config.js';
 import { discoverProjects, listSessionFiles, parseSessionFile } from './claude-code/client.js';
 import { summarizeSession, fallbackSummary } from './claude-code/summarize.js';
@@ -158,7 +159,7 @@ async function ingestClickUp(store: GraphStore) {
   const config = getClickUpConfig();
   const client = getClickUpClient(config.token);
 
-  const { workspaceId } = await verifyClickUpAuth(client);
+  const { workspaceId, workspaceName } = await verifyClickUpAuth(client);
 
   const backfillSince = new Date(
     Date.now() - config.backfillDays * 86400 * 1000,
@@ -239,7 +240,7 @@ async function ingestClickUp(store: GraphStore) {
         const docTs = new Date(Number(doc.date_updated)).toISOString();
         if (docTs <= docSince) continue;
 
-        const item = normalizeClickUpDoc(doc, workspaceId, config.topicAllowlist);
+        const item = normalizeClickUpDoc(doc, workspaceId, workspaceName, config.topicAllowlist);
         if (item) {
           normalized.push(item);
           if (docTs > latestDocTs) latestDocTs = docTs;
@@ -767,6 +768,13 @@ async function main() {
         console.error(`${sources[i].name}: FAILED — ${result.reason?.message ?? result.reason}`);
       }
     }
+  }
+
+  // Post-ingestion: link Person nodes that represent the same real person
+  try {
+    await linkPersons(store);
+  } catch (err) {
+    logger.warn({ err }, 'Person linking failed — skipping');
   }
 
   await writeStatusFile(store, 'success');

@@ -21,6 +21,10 @@ export const KUZU_MIGRATIONS = [
   `ALTER TABLE Container ADD updated_at STRING`,
   `ALTER TABLE SourceAccount ADD created_at STRING`,
   `ALTER TABLE SourceAccount ADD updated_at STRING`,
+  // Phase 2: message_count on Activity
+  `ALTER TABLE Activity ADD message_count INT32 DEFAULT 0`,
+  // Phase 3: tier on Topic
+  `ALTER TABLE Topic ADD tier STRING DEFAULT 'semantic'`,
   // Rel table columns
   `ALTER TABLE IDENTIFIES ADD first_seen STRING`,
   `ALTER TABLE OWNS ADD timestamp STRING`,

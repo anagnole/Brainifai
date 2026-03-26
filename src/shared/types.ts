@@ -15,6 +15,7 @@ export interface Activity {
   url?: string;             // permalink
   thread_ts?: string;       // for threading support
   parent_source_id?: string; // source_id of parent activity (for REPLIES_TO edges)
+  message_count?: number;   // total messages in session (user + assistant)
   created_at?: string;      // ISO 8601 — set on first insert
   updated_at?: string;      // ISO 8601 — updated on every MERGE
   valid_from?: string;      // ISO 8601 — when the event actually happened
@@ -22,6 +23,7 @@ export interface Activity {
 
 export interface Topic {
   name: string;             // lowercased
+  tier?: 'semantic' | 'ephemeral';
 }
 
 export interface Container {

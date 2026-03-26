@@ -68,7 +68,7 @@ export function normalizeSlackMessage(
       account_id: msg.user,
       linked_person_key: personKey,
     },
-    topics: annotations.topics.map((name) => ({ name })),
+    topics: annotations.topics.map((name) => ({ name, tier: 'semantic' as const })),
     mentions: mentions.length > 0 ? mentions : undefined,
     urls: annotations.urls.length > 0 ? annotations.urls : undefined,
   };
