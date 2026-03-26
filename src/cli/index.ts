@@ -6,6 +6,7 @@ import { listCommand } from './commands/list.js';
 import { describeCommand } from './commands/describe.js';
 import { doctorCommand } from './commands/doctor.js';
 import { removeCommand } from './commands/remove.js';
+import { ingestCommand } from './commands/ingest.js';
 
 const program = new Command();
 
@@ -20,5 +21,6 @@ program.addCommand(listCommand());
 program.addCommand(describeCommand());
 program.addCommand(doctorCommand());
 program.addCommand(removeCommand());
+program.addCommand(ingestCommand());
 
 await program.parseAsync();

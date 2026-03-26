@@ -85,24 +85,42 @@ export async function createBaseRegistry(): Promise<ContextFunctionRegistry> {
   registry.register(ehr.temporalRelationFn);
   registry.register(ehr.findCohortFn);
 
-  // Coding bridge functions — GitNexus code intelligence + Brainifai enrichment
-  const {
-    searchCodeFn,
-    symbolContextFn,
-    blastRadiusFn,
-    detectChangesFn,
-    prContextFn,
-  } = await import('./functions/coding-bridge.js');
-
-  registry.register(searchCodeFn);
-  registry.register(symbolContextFn);
-  registry.register(blastRadiusFn);
-  registry.register(detectChangesFn);
-  registry.register(prContextFn);
-
   // Cross-instance function — only activated when instance has a parent
   const { broaderContextFn } = await import('./functions/cross-instance.js');
   registry.register(broaderContextFn);
+
+  // Coding bridge functions — GitNexus × Brainifai (coding instance type)
+  const {
+    searchCodeFn,
+    getSymbolContextFn,
+    getBlastRadiusFn,
+    detectCodeChangesFn,
+    getPrContextFn,
+  } = await import('./functions/coding-bridge.js');
+  registry.register(searchCodeFn);
+  registry.register(getSymbolContextFn);
+  registry.register(getBlastRadiusFn);
+  registry.register(detectCodeChangesFn);
+  registry.register(getPrContextFn);
+
+  // Project Manager functions
+  const {
+    searchProjectsFn,
+    getProjectHealthFn,
+    getProjectActivityFn,
+    getCrossProjectImpactFn,
+    findStaleProjectsFn,
+    getDependencyGraphFn,
+    getClaudeSessionHistoryFn,
+  } = await import('./functions/project-manager.js');
+
+  registry.register(searchProjectsFn);
+  registry.register(getProjectHealthFn);
+  registry.register(getProjectActivityFn);
+  registry.register(getCrossProjectImpactFn);
+  registry.register(findStaleProjectsFn);
+  registry.register(getDependencyGraphFn);
+  registry.register(getClaudeSessionHistoryFn);
 
   return registry;
 }

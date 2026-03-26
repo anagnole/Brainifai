@@ -1,291 +1,501 @@
-// ─── Coding Bridge Context Functions ─────────────────────────────────────────
-//
-// Combines GitNexus code intelligence (symbols, call chains, blast radius) with
-// Brainifai's knowledge graph (decisions, sessions, PR activity, people).
-//
-// GitNexus handles: what code does, how it connects, what it affects.
-// Brainifai handles: who worked on it, why decisions were made, what changed.
+/**
+ * coding-bridge.ts — GitNexus × Brainifai bridge for the coding instance type.
+ *
+ * Each function calls a GitNexus CLI command for structural code intelligence
+ * (call chains, blast radius, symbol context), then enriches the result with
+ * relevant decisions, sessions, and activity from the Brainifai KG.
+ *
+ * Pattern for adding a new bridge function:
+ *   1. Define the input schema (zod)
+ *   2. Call runGitNexus([...args]) to get code-level data
+ *   3. Extract keywords from the GN result
+ *   4. Call enrichFromBrainifai(store, keywords) to get matching KG context
+ *   5. Return both merged — do NOT lose information from either side
+ *
+ * CLI → output shape mapping (verified against live index):
+ *   gitnexus query  → { processes[], process_symbols[], definitions[] }
+ *   gitnexus context → { status, symbol, incoming.calls[], outgoing.calls[], processes[] }
+ *   gitnexus impact  → { target, risk, impactedCount, summary, affected_processes[], affected_modules[], byDepth{} }
+ *
+ * Note: gitnexus requires --repo <name> when multiple repos are indexed.
+ */
 
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { z } from 'zod';
 import type { ContextFunction } from '../types.js';
-import { truncateEvidence } from '../../mcp/safety.js';
-import { DEFAULT_WINDOW_DAYS } from '../../shared/constants.js';
-import { execGitNexus, detectRepoName } from './gitnexus-client.js';
+import type { GraphStore } from '../../graphstore/types.js';
+import { MAX_EVIDENCE_ITEMS } from '../../shared/constants.js';
 
-// Re-exported unchanged — no GitNexus enrichment needed for decision log
-export { decisionLogFn } from './decision-log.js';
+const execFileAsync = promisify(execFile);
 
-// ─── search_code ──────────────────────────────────────────────────────────────
+// ─── GitNexus CLI runner ───────────────────────────────────────────────────────
 
+const GN_TIMEOUT_MS = 8_000;
+const GN_MAX_BUFFER = 10 * 1024 * 1024; // 10 MB
+
+/**
+ * Execute a gitnexus CLI command and return the parsed JSON output.
+ * Throws a clean Error (strips Node.js stack traces from stderr).
+ */
+async function runGitNexus(args: string[]): Promise<unknown> {
+  try {
+    const { stdout } = await execFileAsync('gitnexus', args, {
+      timeout: GN_TIMEOUT_MS,
+      maxBuffer: GN_MAX_BUFFER,
+    });
+    return JSON.parse(stdout.trim());
+  } catch (err: unknown) {
+    const raw =
+      (err as { stderr?: string; message?: string }).stderr ??
+      (err as { message?: string }).message ??
+      String(err);
+    // Extract just the Error: line — gitnexus prints full Node stack traces
+    const match = raw.match(/Error:\s*(.+)/);
+    throw new Error(match ? match[1].trim() : raw.split('\n')[0].trim());
+  }
+}
+
+/** Return ['--repo', name] when repo is specified, otherwise []. */
+function repoArgs(repo?: string): string[] {
+  return repo ? ['--repo', repo] : [];
+}
+
+// ─── Brainifai enrichment ──────────────────────────────────────────────────────
+
+/**
+ * Query the Brainifai KG for recent decisions, insights, bug fixes, and session
+ * summaries whose snippet mentions any of the provided keywords.
+ * Returns up to 5 matching items, truncated to 300 chars each.
+ */
+async function enrichFromBrainifai(
+  store: GraphStore,
+  keywords: string[],
+  windowDays = 30,
+): Promise<Array<{ timestamp: string; kind: string; snippet: string; channel: string }>> {
+  const lower = keywords.map((k) => k.toLowerCase()).filter(Boolean);
+  if (lower.length === 0) return [];
+
+  const since = new Date(Date.now() - windowDays * 86400 * 1000).toISOString();
+  const items = await store.getRecentActivity({
+    kinds: ['decision', 'insight', 'bug_fix', 'session_summary'],
+    since,
+    limit: 40,
+  });
+
+  return items
+    .filter((i) => {
+      const hay = (i.snippet ?? '').toLowerCase();
+      return lower.some((kw) => hay.includes(kw));
+    })
+    .slice(0, 5)
+    .map((i) => ({
+      timestamp: i.timestamp.slice(0, 10),
+      kind: i.kind,
+      snippet: i.snippet.slice(0, 300),
+      channel: i.channel,
+    }));
+}
+
+// ─── GitNexus output type definitions ─────────────────────────────────────────
+// Derived from live CLI runs — keep in sync with gitnexus output changes.
+
+interface GNProcess {
+  id: string;
+  summary: string;
+  priority: number;
+  symbol_count: number;
+  process_type: string;
+  step_count: number;
+}
+
+interface GNSymbolRef {
+  id?: string;
+  uid?: string;
+  name: string;
+  filePath: string;
+  startLine?: number;
+  endLine?: number;
+  module?: string;
+}
+
+interface GNQueryResult {
+  processes: GNProcess[];
+  process_symbols: GNSymbolRef[];
+  definitions: GNSymbolRef[];
+}
+
+interface GNContextResult {
+  status: string;
+  symbol: {
+    uid: string;
+    name: string;
+    filePath: string;
+    startLine?: number;
+    endLine?: number;
+  };
+  incoming: { calls: GNSymbolRef[] };
+  outgoing: { calls: GNSymbolRef[] };
+  processes: Array<{ id: string; name: string; step_index: number; step_count: number }>;
+}
+
+interface GNImpactDepthEntry {
+  depth: number;
+  id: string;
+  name: string;
+  filePath: string;
+  relationType: string;
+  confidence: number;
+}
+
+interface GNImpactResult {
+  target: { id: string; name: string; filePath: string };
+  direction: string;
+  impactedCount: number;
+  risk: string; // "CRITICAL" | "HIGH" | "MEDIUM" | "LOW"
+  summary: { direct: number; processes_affected: number; modules_affected: number };
+  affected_processes: Array<{ name: string; hits: number; step_count: number }>;
+  affected_modules: Array<{ name: string; hits: number; impact: string }>;
+  byDepth: Record<string, GNImpactDepthEntry[]>;
+}
+
+// ─── Bridge context functions ──────────────────────────────────────────────────
+
+/**
+ * search_code
+ * Hybrid search across the GitNexus knowledge graph for execution flows
+ * related to a concept, enriched with Brainifai decisions and sessions.
+ */
 export const searchCodeFn: ContextFunction = {
   name: 'search_code',
   description:
-    'Search the codebase for symbols, execution flows, and code related to a concept (via GitNexus hybrid BM25+semantic search). Results are enriched with Brainifai knowledge: who worked on related areas and recent technical decisions.',
+    'Search the codebase for execution flows and symbols related to a concept. ' +
+    'Returns matching processes, symbols, and definitions from GitNexus, ' +
+    'enriched with related decisions and session history from Brainifai.',
   schema: {
-    query: z.string().describe('Search query — concept, symbol name, or feature area'),
-    repo: z.string().optional().describe('Repository name (auto-detected from project dir if omitted)'),
-    limit: z.number().int().min(1).max(20).default(5).describe('Max processes/symbols to return'),
-    window_days: z
-      .number().int().min(1).max(90).default(14)
-      .describe('Days back to look for Brainifai activity enrichment'),
+    query: z.string().min(1).describe('Concept, feature, or topic to search for'),
+    repo: z
+      .string()
+      .optional()
+      .describe('Repository name — required when multiple repos are indexed'),
+    limit: z.number().int().min(1).max(20).default(5).describe('Max processes to return'),
+    context: z.string().optional().describe('Task context to improve result ranking'),
+    goal: z.string().optional().describe('What you are trying to find or accomplish'),
   },
   async execute(input, store) {
-    const { query, repo, limit, window_days } = input as {
-      query: string; repo?: string; limit?: number; window_days?: number;
+    const { query, repo, limit, context, goal } = input as {
+      query: string;
+      repo?: string;
+      limit?: number;
+      context?: string;
+      goal?: string;
     };
 
-    const repoName = repo ?? detectRepoName();
-    const maxItems = Math.min(limit ?? 5, 20);
-    const windowDays = window_days ?? DEFAULT_WINDOW_DAYS;
-    const windowStart = new Date(Date.now() - windowDays * 86400 * 1000).toISOString();
+    const args = ['query', query, '--limit', String(limit ?? 5), ...repoArgs(repo)];
+    if (context) args.push('--context', context);
+    if (goal) args.push('--goal', goal);
 
-    const gnArgs = ['-l', String(maxItems)];
-    if (repoName) gnArgs.push('-r', repoName);
+    const gn = (await runGitNexus(args)) as GNQueryResult;
 
-    const [gnResult, brainifaiActivity] = await Promise.all([
-      execGitNexus('query', [query, ...gnArgs]),
-      store.getRecentActivity({
-        kinds: ['decision', 'insight', 'bug_fix', 'session_summary'],
-        since: windowStart,
-        limit: 20,
-      }),
-    ]);
+    // Keywords for enrichment: query term + process summaries + symbol names
+    const keywords = [
+      query,
+      ...gn.processes.map((p) => p.summary),
+      ...gn.process_symbols.slice(0, 10).map((s) => s.name),
+    ];
 
-    const codeResults = gnResult.ok
-      ? gnResult.data
-      : { unavailable: true, reason: gnResult.error.message };
-
-    const activity = truncateEvidence(
-      brainifaiActivity.map((i) => ({
-        timestamp: i.timestamp,
-        kind: i.kind,
-        snippet: i.snippet,
-        actor: i.actor,
-        channel: i.channel,
-      })),
-      10,
-    );
+    const brainifai = await enrichFromBrainifai(store, keywords);
 
     return {
       query,
-      repo: repoName,
-      code_results: codeResults,
-      brainifai_context: { recent_activity: activity, window_days: windowDays },
+      repo: repo ?? 'auto',
+      processes: gn.processes,
+      symbols: gn.process_symbols.slice(0, MAX_EVIDENCE_ITEMS),
+      definitions: gn.definitions.slice(0, 10),
+      brainifai_context: brainifai,
     };
   },
 };
 
-// ─── get_symbol_context ───────────────────────────────────────────────────────
-
-export const symbolContextFn: ContextFunction = {
+/**
+ * get_symbol_context
+ * 360-degree view of a code symbol: callers, callees, processes it participates in.
+ * Enriched with Brainifai decisions and sessions that mention this symbol.
+ */
+export const getSymbolContextFn: ContextFunction = {
   name: 'get_symbol_context',
   description:
-    '360-degree view of a code symbol: callers, callees, and execution processes (via GitNexus). Enriched with Brainifai decision log and session summaries to show the history of why this code area exists.',
+    '360-degree view of a code symbol: who calls it, what it calls, which ' +
+    'execution processes it participates in. Enriched with related decisions ' +
+    'and session summaries from Brainifai.',
   schema: {
-    symbol: z.string().describe('Symbol name — function, class, or method'),
-    repo: z.string().optional().describe('Repository name (auto-detected if omitted)'),
-    file: z.string().optional().describe('File path to disambiguate common symbol names'),
-    window_days: z
-      .number().int().min(1).max(90).default(30)
-      .describe('Days back to look for Brainifai decisions'),
+    symbol: z.string().min(1).describe('Symbol name (function, class, method, interface)'),
+    repo: z.string().optional().describe('Repository name'),
+    file: z
+      .string()
+      .optional()
+      .describe('File path to disambiguate symbols that share a name'),
   },
   async execute(input, store) {
-    const { symbol, repo, file, window_days } = input as {
-      symbol: string; repo?: string; file?: string; window_days?: number;
+    const { symbol, repo, file } = input as {
+      symbol: string;
+      repo?: string;
+      file?: string;
     };
 
-    const repoName = repo ?? detectRepoName();
-    const windowDays = window_days ?? DEFAULT_WINDOW_DAYS;
-    const windowStart = new Date(Date.now() - windowDays * 86400 * 1000).toISOString();
+    const args = ['context', symbol, ...repoArgs(repo)];
+    if (file) args.push('--file', file);
 
-    const gnArgs: string[] = [];
-    if (repoName) gnArgs.push('-r', repoName);
-    if (file) gnArgs.push('-f', file);
+    const gn = (await runGitNexus(args)) as GNContextResult;
 
-    const [gnResult, decisions] = await Promise.all([
-      execGitNexus('context', [symbol, ...gnArgs]),
-      store.getRecentActivity({
-        kinds: ['decision', 'insight', 'bug_fix', 'session_summary'],
-        since: windowStart,
-        limit: 15,
-      }),
-    ]);
+    if (gn.status !== 'found') {
+      return {
+        symbol,
+        status: gn.status,
+        message: 'Symbol not found in GitNexus index. Try a different name or --file to disambiguate.',
+      };
+    }
 
-    const symbolContext = gnResult.ok
-      ? gnResult.data
-      : { unavailable: true, reason: gnResult.error.message };
+    const keywords = [
+      symbol,
+      gn.symbol.filePath,
+      ...gn.incoming.calls.slice(0, 5).map((c) => c.name),
+      ...gn.outgoing.calls.slice(0, 5).map((c) => c.name),
+    ];
 
-    const knowledgeContext = truncateEvidence(
-      decisions.map((i) => ({
-        timestamp: i.timestamp,
-        kind: i.kind,
-        snippet: i.snippet,
-        actor: i.actor,
-      })),
-      10,
-    );
+    const brainifai = await enrichFromBrainifai(store, keywords);
 
     return {
-      symbol,
-      repo: repoName,
-      symbol_context: symbolContext,
-      brainifai_context: { decisions: knowledgeContext, window_days: windowDays },
+      symbol: gn.symbol,
+      callers: gn.incoming.calls,
+      callees: gn.outgoing.calls,
+      processes: gn.processes,
+      brainifai_context: brainifai,
     };
   },
 };
 
-// ─── get_blast_radius ─────────────────────────────────────────────────────────
-
-export const blastRadiusFn: ContextFunction = {
+/**
+ * get_blast_radius
+ * Blast radius analysis: what code is affected if a symbol or file changes?
+ * Enriched with Brainifai decisions related to the affected modules/processes.
+ */
+export const getBlastRadiusFn: ContextFunction = {
   name: 'get_blast_radius',
   description:
-    'Blast radius analysis: what breaks if a symbol changes (via GitNexus impact). Enriched with Brainifai context about who has been working in affected areas and recent sessions.',
+    'Blast radius analysis: what code breaks or is affected if a symbol changes? ' +
+    'Returns impacted modules, processes, and a risk level. ' +
+    'Enriched with related Brainifai decisions and session history.',
   schema: {
-    symbol: z.string().describe('Symbol to analyze'),
-    repo: z.string().optional().describe('Repository name (auto-detected if omitted)'),
+    target: z.string().min(1).describe('Symbol name or file path to analyse'),
+    repo: z.string().optional().describe('Repository name'),
+    depth: z
+      .number()
+      .int()
+      .min(1)
+      .max(5)
+      .default(3)
+      .describe('Maximum relationship depth to traverse'),
     direction: z
       .enum(['upstream', 'downstream'])
       .default('upstream')
       .describe('upstream = what depends on this symbol; downstream = what this symbol depends on'),
-    depth: z.number().int().min(1).max(10).default(3).describe('Max relationship depth'),
-    window_days: z
-      .number().int().min(1).max(90).default(14)
-      .describe('Days back to look for Brainifai session activity'),
   },
   async execute(input, store) {
-    const { symbol, repo, direction, depth, window_days } = input as {
-      symbol: string; repo?: string; direction?: string; depth?: number; window_days?: number;
+    const { target, repo, depth, direction } = input as {
+      target: string;
+      repo?: string;
+      depth?: number;
+      direction?: 'upstream' | 'downstream';
     };
 
-    const repoName = repo ?? detectRepoName();
-    const dir = direction ?? 'upstream';
-    const windowDays = window_days ?? DEFAULT_WINDOW_DAYS;
-    const windowStart = new Date(Date.now() - windowDays * 86400 * 1000).toISOString();
+    const args = [
+      'impact', target,
+      '--depth', String(depth ?? 3),
+      '--direction', direction ?? 'upstream',
+      ...repoArgs(repo),
+    ];
 
-    const gnArgs = ['-d', dir, '--depth', String(depth ?? 3)];
-    if (repoName) gnArgs.push('-r', repoName);
+    const gn = (await runGitNexus(args)) as GNImpactResult;
 
-    const [gnResult, recentActivity] = await Promise.all([
-      execGitNexus('impact', [symbol, ...gnArgs]),
-      store.getRecentActivity({
-        kinds: ['session_summary', 'decision', 'bug_fix'],
-        since: windowStart,
-        limit: 15,
-      }),
-    ]);
+    const depth1 = gn.byDepth['1'] ?? [];
+    const keywords = [
+      target,
+      gn.target.filePath,
+      ...gn.affected_modules.map((m) => m.name),
+      ...depth1.slice(0, 5).map((s) => s.name),
+    ];
 
-    const impactData = gnResult.ok
-      ? gnResult.data
-      : { unavailable: true, reason: gnResult.error.message };
-
-    const activity = truncateEvidence(
-      recentActivity.map((i) => ({
-        timestamp: i.timestamp,
-        kind: i.kind,
-        snippet: i.snippet,
-        actor: i.actor,
-        channel: i.channel,
-      })),
-      10,
-    );
+    const brainifai = await enrichFromBrainifai(store, keywords);
 
     return {
-      symbol,
-      repo: repoName,
-      direction: dir,
-      impact: impactData,
-      brainifai_context: { recent_sessions: activity, window_days: windowDays },
+      target: gn.target,
+      risk: gn.risk,
+      direction: gn.direction,
+      impacted_count: gn.impactedCount,
+      summary: gn.summary,
+      affected_processes: gn.affected_processes.slice(0, 10),
+      affected_modules: gn.affected_modules,
+      direct_dependants: depth1.slice(0, 15),
+      brainifai_context: brainifai,
     };
   },
 };
 
-// ─── detect_code_changes ──────────────────────────────────────────────────────
-
-export const detectChangesFn: ContextFunction = {
+/**
+ * detect_code_changes
+ * Given a list of changed symbols or files (e.g. extracted from a git diff),
+ * maps each change to its blast radius and aggregates the full set of affected
+ * processes and modules. Enriched with Brainifai task and people context.
+ *
+ * Note: gitnexus has no dedicated detect_changes CLI command; this function
+ * composes `gitnexus impact` across the provided change list and merges results.
+ */
+export const detectCodeChangesFn: ContextFunction = {
   name: 'detect_code_changes',
   description:
-    'Map current git diff to affected processes and code areas (via GitNexus detect-changes). Enriched with Brainifai task and people context for the affected symbols.',
+    'Map a set of changed symbols or files to their aggregate blast radius. ' +
+    'Accepts a list of changed identifiers (from a git diff or PR) and returns ' +
+    'the union of all affected processes and modules, plus related Brainifai context.',
   schema: {
-    repo: z.string().optional().describe('Repository name (auto-detected if omitted)'),
-    window_days: z
-      .number().int().min(1).max(90).default(7)
-      .describe('Days back to look for Brainifai activity'),
+    changes: z
+      .array(z.string())
+      .min(1)
+      .max(10)
+      .describe('Changed symbol names or file paths (from a diff or PR)'),
+    repo: z.string().optional().describe('Repository name'),
+    depth: z
+      .number()
+      .int()
+      .min(1)
+      .max(4)
+      .default(2)
+      .describe('Impact depth to traverse per change'),
   },
   async execute(input, store) {
-    const { repo, window_days } = input as { repo?: string; window_days?: number };
+    const { changes, repo, depth } = input as {
+      changes: string[];
+      repo?: string;
+      depth?: number;
+    };
 
-    const repoName = repo ?? detectRepoName();
-    const windowDays = window_days ?? 7;
-    const windowStart = new Date(Date.now() - windowDays * 86400 * 1000).toISOString();
+    // Cap at 5 targets to stay within the overall query timeout
+    const targets = changes.slice(0, 5);
 
-    const gnArgs: string[] = [];
-    if (repoName) gnArgs.push('--repo', repoName);
-
-    const [gnResult, recentActivity] = await Promise.all([
-      execGitNexus('detect-changes', gnArgs),
-      store.getRecentActivity({ since: windowStart, limit: 20 }),
-    ]);
-
-    const changesData = gnResult.ok
-      ? gnResult.data
-      : { unavailable: true, reason: gnResult.error.message };
-
-    const activity = truncateEvidence(
-      recentActivity.map((i) => ({
-        timestamp: i.timestamp,
-        kind: i.kind,
-        snippet: i.snippet,
-        actor: i.actor,
-        channel: i.channel,
-      })),
-      15,
+    const settled = await Promise.allSettled(
+      targets.map((t) =>
+        runGitNexus([
+          'impact', t,
+          '--depth', String(depth ?? 2),
+          '--direction', 'upstream',
+          ...repoArgs(repo),
+        ]).then((r) => ({ target: t, result: r as GNImpactResult })),
+      ),
     );
 
+    // Aggregate across all targets: sum hits per process/module
+    const processMap = new Map<string, { name: string; hits: number }>();
+    const moduleMap = new Map<string, { name: string; hits: number; impact: string }>();
+    const perChange: Array<{ target: string; risk: string; impacted: number; error?: string }> = [];
+    const keywords: string[] = [...changes];
+
+    for (const s of settled) {
+      if (s.status === 'rejected') {
+        // Surface per-target errors without failing the whole call
+        const idx = settled.indexOf(s);
+        perChange.push({
+          target: targets[idx] ?? 'unknown',
+          risk: 'UNKNOWN',
+          impacted: 0,
+          error: (s.reason as Error).message,
+        });
+        continue;
+      }
+      const { target, result } = s.value;
+      perChange.push({ target, risk: result.risk, impacted: result.impactedCount });
+      for (const p of result.affected_processes) {
+        const entry = processMap.get(p.name) ?? { name: p.name, hits: 0 };
+        entry.hits += p.hits;
+        processMap.set(p.name, entry);
+      }
+      for (const m of result.affected_modules) {
+        const entry = moduleMap.get(m.name) ?? { name: m.name, hits: 0, impact: m.impact };
+        entry.hits += m.hits;
+        moduleMap.set(m.name, entry);
+      }
+      keywords.push(...result.affected_modules.map((m) => m.name));
+    }
+
+    const brainifai = await enrichFromBrainifai(store, keywords);
+
     return {
-      repo: repoName,
-      code_changes: changesData,
-      brainifai_context: { recent_activity: activity, window_days: windowDays },
+      changes: perChange,
+      aggregated_processes: [...processMap.values()]
+        .sort((a, b) => b.hits - a.hits)
+        .slice(0, 15),
+      aggregated_modules: [...moduleMap.values()].sort((a, b) => b.hits - a.hits),
+      brainifai_context: brainifai,
     };
   },
 };
 
-// ─── get_pr_context ───────────────────────────────────────────────────────────
-
-export const prContextFn: ContextFunction = {
+/**
+ * get_pr_context
+ * Recent pull requests from Brainifai, optionally enriched with GitNexus
+ * blast-radius analysis on specific symbols touched by those PRs.
+ */
+export const getPrContextFn: ContextFunction = {
   name: 'get_pr_context',
   description:
-    'Recent pull requests with optional code impact analysis. Combines Brainifai PR/review activity (grouped by repo) with GitNexus blast radius data when a symbol is provided.',
+    'Recent pull requests from the knowledge graph, enriched with GitNexus impact analysis. ' +
+    'Pass enrich_symbols to get blast-radius data for specific symbols mentioned in the PRs.',
   schema: {
-    window_days: z.number().int().min(1).max(365).default(14).describe('How many days back to look'),
-    limit: z.number().int().min(1).max(50).default(20).describe('Maximum PRs to return'),
-    symbol: z
-      .string().optional()
-      .describe('Optional symbol name — fetches GitNexus impact to show code areas affected by PRs'),
-    repo: z.string().optional().describe('Repository name for GitNexus lookup (auto-detected if omitted)'),
+    window_days: z
+      .number()
+      .int()
+      .min(1)
+      .max(365)
+      .default(14)
+      .describe('How many days back to look'),
+    limit: z.number().int().min(1).max(20).default(10).describe('Maximum PRs to return'),
+    repo: z
+      .string()
+      .optional()
+      .describe('Repository name for GitNexus impact lookup'),
+    enrich_symbols: z
+      .array(z.string())
+      .max(3)
+      .optional()
+      .describe('Up to 3 symbol names to run blast-radius analysis on'),
   },
   async execute(input, store) {
-    const { window_days, limit, symbol, repo } = input as {
-      window_days?: number; limit?: number; symbol?: string; repo?: string;
+    const { window_days, limit, repo, enrich_symbols } = input as {
+      window_days?: number;
+      limit?: number;
+      repo?: string;
+      enrich_symbols?: string[];
     };
 
-    const windowDays = window_days ?? DEFAULT_WINDOW_DAYS;
-    const maxItems = Math.min(limit ?? 20, 50);
-    const windowStart = new Date(Date.now() - windowDays * 86400 * 1000).toISOString();
+    const windowDays = window_days ?? 14;
+    const maxItems = Math.min(limit ?? 10, 20);
+    const since = new Date(Date.now() - windowDays * 86400 * 1000).toISOString();
 
     // Fetch PR activity from Brainifai
-    const items = await store.getRecentActivity({
+    const prItems = await store.getRecentActivity({
       kinds: ['pull_request', 'pr_review', 'pr_comment'],
-      since: windowStart,
+      since,
       limit: maxItems,
     });
 
-    const results = items.length > 0
-      ? items
-      : await store
-          .getRecentActivity({ since: windowStart, limit: maxItems })
-          .then((all) => all.filter((i) => i.source === 'github'));
+    // Fall back to all GitHub-sourced activity if no PR-specific kinds exist
+    const results =
+      prItems.length > 0
+        ? prItems
+        : await store
+            .getRecentActivity({ since, limit: maxItems })
+            .then((all) => all.filter((i) => i.source === 'github'));
 
-    // Group by repo/channel
+    // Group by channel (repo name)
     const byRepo = new Map<string, typeof results>();
     for (const item of results) {
       const group = byRepo.get(item.channel) ?? [];
@@ -293,41 +503,51 @@ export const prContextFn: ContextFunction = {
       byRepo.set(item.channel, group);
     }
 
-    const grouped = Object.fromEntries(
-      [...byRepo.entries()].map(([repoName, repoItems]) => [
-        repoName,
-        truncateEvidence(
-          repoItems.map((i) => ({
-            timestamp: i.timestamp,
-            kind: i.kind,
-            snippet: i.snippet,
-            actor: i.actor,
-            url: i.url,
+    // Run GitNexus impact on requested symbols (cap at 3)
+    let impactData: unknown[] = [];
+    if (enrich_symbols && enrich_symbols.length > 0) {
+      const settled = await Promise.allSettled(
+        enrich_symbols.slice(0, 3).map((sym) =>
+          runGitNexus(['impact', sym, '--depth', '2', ...repoArgs(repo)]).then((r) => ({
+            symbol: sym,
+            impact: r as GNImpactResult,
           })),
-          maxItems,
         ),
-      ]),
-    );
-
-    // Optionally enrich with GitNexus blast radius for a referenced symbol
-    let symbolImpact: unknown = undefined;
-    if (symbol) {
-      const repoName = repo ?? detectRepoName();
-      const gnArgs = ['-d', 'upstream', '--depth', '3'];
-      if (repoName) gnArgs.push('-r', repoName);
-      const gnResult = await execGitNexus('impact', [symbol, ...gnArgs]);
-      symbolImpact = {
-        symbol,
-        repo: repoName,
-        impact: gnResult.ok ? gnResult.data : { unavailable: true, reason: gnResult.error.message },
-      };
+      );
+      impactData = settled
+        .filter(
+          (
+            s,
+          ): s is PromiseFulfilledResult<{
+            symbol: string;
+            impact: GNImpactResult;
+          }> => s.status === 'fulfilled',
+        )
+        .map((s) => ({
+          symbol: s.value.symbol,
+          risk: s.value.impact.risk,
+          impacted_count: s.value.impact.impactedCount,
+          affected_modules: s.value.impact.affected_modules,
+          affected_processes: s.value.impact.affected_processes.slice(0, 5),
+        }));
     }
 
     return {
       window_days: windowDays,
-      repos: grouped,
       total: results.length,
-      ...(symbolImpact !== undefined ? { symbol_impact: symbolImpact } : {}),
+      by_repo: Object.fromEntries(
+        [...byRepo.entries()].map(([r, items]) => [
+          r,
+          items.map((i) => ({
+            timestamp: i.timestamp,
+            kind: i.kind,
+            snippet: i.snippet.slice(0, 300),
+            actor: i.actor,
+            url: i.url,
+          })),
+        ]),
+      ),
+      gitnexus_impact: impactData.length > 0 ? impactData : null,
     };
   },
 };

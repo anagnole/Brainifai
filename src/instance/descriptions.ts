@@ -14,6 +14,7 @@ export function generateDescription(
   const typeLabel = type === 'coding' ? 'Coding project'
     : type === 'manager' ? 'Management'
     : type === 'general' ? 'General-purpose'
+    : type === 'project-manager' ? 'Project Manager'
     : `Custom (${type})`;
 
   return `${typeLabel} instance for ${name}, subscribed to ${enabledSources || 'no sources'}.`;

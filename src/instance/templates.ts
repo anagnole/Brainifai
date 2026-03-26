@@ -10,7 +10,7 @@ export interface InstanceTemplate {
 export const TEMPLATES: Record<string, InstanceTemplate> = {
   coding: {
     type: 'coding',
-    description: 'Code-focused instance — bridges GitNexus code intelligence (symbols, blast radius, execution flows) with Brainifai knowledge (decisions, sessions, PR activity)',
+    description: 'Code-focused instance — GitNexus code intelligence (call chains, blast radius, symbol context) bridged with Brainifai KG decisions, sessions, and PR history',
     sources: [
       { source: 'github', enabled: true },
       { source: 'claude-code', enabled: true },
@@ -19,7 +19,7 @@ export const TEMPLATES: Record<string, InstanceTemplate> = {
       'get_context_packet', 'search_entities', 'get_entity_summary',
       'get_recent_activity',
       'search_code', 'get_symbol_context', 'get_blast_radius', 'detect_code_changes',
-      'get_decision_log', 'get_pr_context',
+      'get_pr_context', 'get_decision_log',
     ],
   },
   manager: {
@@ -48,6 +48,16 @@ export const TEMPLATES: Record<string, InstanceTemplate> = {
       'get_labs',
       'get_temporal_relation',
       'find_cohort',
+    ],
+  },
+  'project-manager': {
+    type: 'project-manager',
+    description: 'Project portfolio management — tracks health, cross-project dependencies, commit activity, Claude session history, and task progress across all repositories',
+    sources: [],
+    contextFunctions: [
+      'search_projects', 'get_project_health', 'get_project_activity',
+      'get_cross_project_impact', 'find_stale_projects',
+      'get_dependency_graph', 'get_claude_session_history',
     ],
   },
   general: {
