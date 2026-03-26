@@ -1,12 +1,20 @@
 // ─── GitNexus CLI Client ──────────────────────────────────────────────────────
 
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 
 const execFileAsync = promisify(execFile);
 
-const GITNEXUS_BIN = '/Users/anagnole/.nvm/versions/node/v24.12.0/bin/gitnexus';
+function resolveGitNexusBin(): string {
+  try {
+    return execFileSync('which', ['gitnexus'], { encoding: 'utf8' }).trim();
+  } catch {
+    return 'gitnexus'; // fall back to PATH lookup at execution time
+  }
+}
+
+const GITNEXUS_BIN = resolveGitNexusBin();
 const TIMEOUT_MS = 30_000;
 
 export interface GitNexusError {

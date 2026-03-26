@@ -3,7 +3,7 @@ dist/
 .env
 .claude
 tasks
-data/kuzu
+data/
 logs
 .flaio/
 .brainifai/

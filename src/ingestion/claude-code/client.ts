@@ -28,7 +28,7 @@ export function listSessionFiles(projectPath: string): Array<{ path: string; mti
 
 /** Derive a human-readable project name from the dir slug. */
 export function deriveProjectName(dirName: string): string {
-  // "-Users-anagnole-Projects-Brainifai" → last segment
+  // "-Users-jane-Projects-MyApp" → last segment
   const parts = dirName.split('-').filter(Boolean);
   return parts[parts.length - 1] || dirName;
 }

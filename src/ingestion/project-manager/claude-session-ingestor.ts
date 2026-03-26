@@ -26,7 +26,7 @@ const CLAUDE_PROJECTS_DIR = resolve(homedir(), '.claude', 'projects');
  * using the path with slashes replaced by hyphens (e.g. /Users/foo/Projects/bar → -Users-foo-Projects-bar)
  */
 function decodeClaudioPath(dirName: string): string {
-  // Directory names like "-Users-anagnole-Projects-Brainifai"
+  // Directory names like "-Users-jane-Projects-MyApp"
   // Replace leading dash then remaining dashes that look like path separators
   return dirName.replace(/-/g, '/');
 }
