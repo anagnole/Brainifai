@@ -8,6 +8,13 @@ export interface SourceSubscription {
   config?: Record<string, unknown>; // source-specific (e.g., channel IDs, repo names)
 }
 
+export interface RecentActivity {
+  timestamp: string;            // ISO 8601
+  kind: string;                 // activity kind
+  snippet: string;              // truncated summary
+  topics: string[];             // topic names
+}
+
 export interface InstanceConfig {
   name: string;                 // e.g., "aballos", "alfred", "global"
   type: InstanceType;           // template type
@@ -15,6 +22,7 @@ export interface InstanceConfig {
   parent: string | null;        // parent instance name (null for global)
   sources: SourceSubscription[];
   contextFunctions?: string[];  // which MCP tools/context functions are active
+  recentActivities?: RecentActivity[];  // last 5 activities (FIFO)
   createdAt: string;            // ISO 8601
   updatedAt: string;            // ISO 8601
   lastIngestion?: string;       // ISO 8601

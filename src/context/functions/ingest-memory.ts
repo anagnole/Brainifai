@@ -7,6 +7,7 @@ import type { NormalizedMessage } from '../../shared/types.js';
 import { MAX_SNIPPET_CHARS } from '../../shared/constants.js';
 import { logger } from '../../shared/logger.js';
 import { resolveInstanceDbPath } from '../../instance/resolve.js';
+import { getChildrenCache } from '../../mcp/children-cache.js';
 
 const MEMORY_KINDS = ['decision', 'insight', 'bug_fix', 'preference', 'session_summary'] as const;
 
@@ -23,8 +24,6 @@ export const ingestMemoryFn: ContextFunction = {
     project: z.string().optional()
       .describe('Project name (defaults to current working directory name)'),
   },
-  // Note: ingest_memory ignores the read-only store parameter and opens its own
-  // short-lived writable connection. This matches the existing pattern.
   async execute(input, _store) {
     const { snippet, topics, kind, project } = input as {
       snippet: string; topics: string[]; kind: typeof MEMORY_KINDS[number]; project?: string;
@@ -74,19 +73,44 @@ export const ingestMemoryFn: ContextFunction = {
       topics: topics.map((t) => ({ name: t.toLowerCase() })),
     };
 
-    // Open a short-lived write store — Kuzu only allows one connection at a time
+    // Use the cached children list (queried at MCP startup, before GraphStore opened)
+    const children = getChildrenCache();
+
+    if (children && children.length > 0) {
+      try {
+        const { orchestrateSource } = await import('../../orchestrator/index.js');
+        const result = await orchestrateSource('memory', [msg], children);
+        logger.info({ sourceId, kind, routed: result.routedToChildren, global: result.routedToGlobal }, 'Memory routed via orchestrator');
+
+        return {
+          message: `Saved ${kind} via orchestrator.`,
+          topics: topics.join(', '),
+          sourceId,
+          routedToChildren: result.routedToChildren,
+          routedToGlobal: result.routedToGlobal,
+        };
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        logger.warn({ err: errMsg, sourceId }, 'Orchestrator failed — falling back to direct write');
+        // Store error for fallback response
+        (globalThis as any).__brainifai_orch_error = errMsg;
+      }
+    }
+
+    // Fallback: write directly to current instance
+    const cacheStatus = children === null ? 'null' : `${children.length} children`;
     const dbPath = resolveInstanceDbPath();
     const writeStore = new KuzuGraphStore({ dbPath, readOnly: false });
     try {
       await writeStore.initialize();
       await upsertBatch(writeStore, [msg]);
-      logger.info({ sourceId, kind }, 'Ingested memory snippet');
+      logger.info({ sourceId, kind, dbPath, cacheStatus }, 'Ingested memory snippet directly');
     } finally {
       await writeStore.close();
     }
 
     return {
-      message: `Saved ${kind} to knowledge graph.`,
+      message: `Saved ${kind} to knowledge graph (direct write, cache: ${cacheStatus}, db: ${dbPath}, orchErr: ${(globalThis as any).__brainifai_orch_error ?? 'none'}).`,
       topics: topics.join(', '),
       sourceId,
     };

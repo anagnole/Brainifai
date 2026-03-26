@@ -1,7 +1,14 @@
 import { useState, useCallback, useEffect } from 'react';
 import Graph from 'graphology';
-import type { EntitySummary } from '../lib/api';
-import { fetchNeighborhood, fetchEntitySummary, fetchOverview } from '../lib/api';
+import type { EntitySummary, Instance } from '../lib/api';
+import {
+  fetchNeighborhood,
+  fetchEntitySummary,
+  fetchOverview,
+  fetchInstances,
+  getCurrentGraphInstance,
+  switchGraphInstance,
+} from '../lib/api';
 import { mergeSubgraph, updateNodeSizes } from '../lib/graph-builder';
 import { runLayout } from '../lib/layout';
 import { SigmaRenderer } from './SigmaRenderer';
@@ -22,26 +29,76 @@ export function GraphExplorer() {
   const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Load initial overview graph on mount
+  // Instance picker state
+  const [instances, setInstances] = useState<Instance[]>([]);
+  const [currentInstance, setCurrentInstance] = useState<string>('');
+  const [switching, setSwitching] = useState(false);
+
+  // Load available instances and current instance on mount
   useEffect(() => {
     (async () => {
       try {
-        const subgraph = await fetchOverview();
-        console.log('[GraphExplorer] overview loaded:', subgraph.nodes.length, 'nodes');
-        if (subgraph.nodes.length > 0) {
-          mergeSubgraph(graph, subgraph);
-          updateNodeSizes(graph);
-          runLayout(graph);
-        }
+        const [instanceList, active] = await Promise.all([
+          fetchInstances(),
+          getCurrentGraphInstance(),
+        ]);
+        setInstances(instanceList);
+        setCurrentInstance(active);
       } catch (err) {
-        console.error('[GraphExplorer] failed to load overview:', err);
-      } finally {
-        setLoading(false);
-        // Delay setting ready so Sigma creates after layout is done
-        setReady(true);
+        console.error('[GraphExplorer] failed to load instances:', err);
       }
     })();
+  }, []);
+
+  // Load overview graph — extracted so we can call it after switching
+  const loadOverview = useCallback(async () => {
+    setLoading(true);
+    setReady(false);
+    setSelectedNode(null);
+    setEntitySummary(null);
+    setHighlightedNodes(new Set());
+
+    // Clear existing graph
+    graph.clear();
+
+    try {
+      const subgraph = await fetchOverview();
+      console.log('[GraphExplorer] overview loaded:', subgraph.nodes.length, 'nodes');
+      if (subgraph.nodes.length > 0) {
+        mergeSubgraph(graph, subgraph);
+        updateNodeSizes(graph);
+        runLayout(graph);
+      }
+    } catch (err) {
+      console.error('[GraphExplorer] failed to load overview:', err);
+    } finally {
+      setLoading(false);
+      setReady(true);
+    }
   }, [graph]);
+
+  // Load initial overview graph on mount
+  useEffect(() => {
+    loadOverview();
+  }, [loadOverview]);
+
+  // Handle instance switch
+  const handleInstanceSwitch = useCallback(
+    async (name: string) => {
+      if (name === currentInstance || switching) return;
+      setSwitching(true);
+      try {
+        await switchGraphInstance(name);
+        setCurrentInstance(name);
+        await loadOverview();
+      } catch (err) {
+        console.error('[GraphExplorer] failed to switch instance:', err);
+      } finally {
+        setSwitching(false);
+      }
+    },
+    [currentInstance, switching, loadOverview],
+  );
 
   const expandNode = useCallback(
     async (nodeId: string) => {
@@ -88,6 +145,29 @@ export function GraphExplorer() {
   return (
     <div className="app">
       <div className="sidebar">
+        {instances.length > 0 && (
+          <div className="instance-picker">
+            <label className="instance-picker-label" htmlFor="instance-select">
+              Instance
+            </label>
+            <select
+              id="instance-select"
+              className="instance-picker-select"
+              value={currentInstance}
+              disabled={switching}
+              onChange={(e) => handleInstanceSwitch(e.target.value)}
+            >
+              {instances.map((inst) => (
+                <option key={inst.name} value={inst.name}>
+                  {inst.name} ({inst.type})
+                </option>
+              ))}
+            </select>
+            {switching && (
+              <span className="instance-picker-status">Switching...</span>
+            )}
+          </div>
+        )}
         <SearchBar onSelect={handleSearchSelect} />
         {entitySummary && (
           <NodeDetail

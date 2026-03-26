@@ -74,6 +74,17 @@ export async function createBaseRegistry(): Promise<ContextFunctionRegistry> {
   registry.register(peopleContextFn);
   registry.register(meetingSummaryFn);
 
+  // EHR-specific functions — registered in the global pool,
+  // but only activated for instances with type 'ehr'
+  const ehr = await import('./functions/ehr.js');
+  registry.register(ehr.searchPatientsFn);
+  registry.register(ehr.patientSummaryFn);
+  registry.register(ehr.medicationsFn);
+  registry.register(ehr.diagnosesFn);
+  registry.register(ehr.labsFn);
+  registry.register(ehr.temporalRelationFn);
+  registry.register(ehr.findCohortFn);
+
   // Cross-instance function — only activated when instance has a parent
   const { broaderContextFn } = await import('./functions/cross-instance.js');
   registry.register(broaderContextFn);

@@ -1,14 +1,9 @@
 /**
- * EHR-specific graph query adapter.
+ * EHR-specific graph query adapter — shared concept node model.
  *
- * Wraps a Kuzu connection with clinical query methods that back the
- * Phase 3 MCP tools (search_patients, get_patient_summary, etc.).
- *
- * Design decisions:
- * - Uses prepare() + execute() with parameters — never string interpolation
- * - Every return type includes entity IDs (for Phase 6 hallucination detection)
- * - Patient summary uses separate parallel queries per relationship type
- *   to avoid Kuzu OPTIONAL MATCH cartesian product issues
+ * Clinical data (dates, values) lives on relationship properties.
+ * Concept nodes are shared across patients.
+ * Queries traverse Patient -[rel]-> ConceptX and read rel properties.
  */
 
 import kuzu from 'kuzu';
@@ -33,7 +28,6 @@ export interface PatientRecord {
 }
 
 export interface ConditionRecord {
-  condition_id: string;
   code: string;
   system: string;
   description: string;
@@ -43,7 +37,6 @@ export interface ConditionRecord {
 }
 
 export interface MedicationRecord {
-  medication_id: string;
   code: string;
   description: string;
   start_date: string;
@@ -54,7 +47,6 @@ export interface MedicationRecord {
 }
 
 export interface ObservationRecord {
-  observation_id: string;
   category: string;
   code: string;
   description: string;
@@ -66,7 +58,6 @@ export interface ObservationRecord {
 }
 
 export interface ProcedureRecord {
-  procedure_id: string;
   code: string;
   system: string;
   description: string;
@@ -130,7 +121,6 @@ export class EhrGraphStore {
     await this.db.close();
   }
 
-  /** Low-level parameterized query */
   private async query(cypher: string, params?: Record<string, KuzuValue>): Promise<Record<string, KuzuValue>[]> {
     if (params && Object.keys(params).length > 0) {
       const ps = await this.conn.prepare(cypher);
@@ -146,7 +136,6 @@ export class EhrGraphStore {
   // ─── Patient Summary ──────────────────────────────────────────────────────
 
   async getPatientSummary(patientId: string): Promise<PatientSummary | null> {
-    // 1. Get patient node
     const patients = await this.query(
       `MATCH (p:Patient {patient_id: $id}) RETURN p`,
       { id: patientId },
@@ -155,41 +144,40 @@ export class EhrGraphStore {
 
     const p = patients[0].p as Record<string, KuzuValue>;
 
-    // 2. Parallel queries for each relationship
     const [conditions, medications, observations, procedures, encounters] = await Promise.all([
       this.query(
-        `MATCH (p:Patient {patient_id: $id})-[:HAS_CONDITION]->(c:Condition)
-         RETURN c.condition_id AS condition_id, c.code AS code, c.system AS system,
-                c.description AS description, c.start_date AS start_date,
-                c.stop_date AS stop_date, c.encounter_id AS encounter_id`,
+        `MATCH (p:Patient {patient_id: $id})-[r:DIAGNOSED_WITH]->(c:ConceptCondition)
+         RETURN c.code AS code, c.system AS system, c.description AS description,
+                r.start_date AS start_date, r.stop_date AS stop_date,
+                r.encounter_id AS encounter_id`,
         { id: patientId },
       ),
       this.query(
-        `MATCH (p:Patient {patient_id: $id})-[:HAS_MEDICATION]->(m:Medication)
-         RETURN m.medication_id AS medication_id, m.code AS code,
-                m.description AS description, m.start_date AS start_date,
-                m.stop_date AS stop_date, m.reason_code AS reason_code,
-                m.reason_description AS reason_description, m.encounter_id AS encounter_id`,
+        `MATCH (p:Patient {patient_id: $id})-[r:PRESCRIBED]->(m:ConceptMedication)
+         RETURN m.code AS code, m.description AS description,
+                r.start_date AS start_date, r.stop_date AS stop_date,
+                r.reason_code AS reason_code, r.reason_description AS reason_description,
+                r.encounter_id AS encounter_id`,
         { id: patientId },
       ),
       this.query(
-        `MATCH (p:Patient {patient_id: $id})-[:HAS_OBSERVATION]->(o:Observation)
-         RETURN o.observation_id AS observation_id, o.category AS category,
-                o.code AS code, o.description AS description, o.value AS value,
-                o.units AS units, o.type AS type, o.date AS date,
-                o.encounter_id AS encounter_id`,
+        `MATCH (p:Patient {patient_id: $id})-[r:HAS_RESULT]->(o:ConceptObservation)
+         RETURN o.code AS code, o.description AS description,
+                r.value AS value, r.units AS units, r.type AS type,
+                r.date AS date, r.category AS category,
+                r.encounter_id AS encounter_id`,
         { id: patientId },
       ),
       this.query(
-        `MATCH (p:Patient {patient_id: $id})-[:HAS_PROCEDURE]->(pr:Procedure)
-         RETURN pr.procedure_id AS procedure_id, pr.code AS code, pr.system AS system,
-                pr.description AS description, pr.start_date AS start_date,
-                pr.stop_date AS stop_date, pr.reason_code AS reason_code,
-                pr.reason_description AS reason_description, pr.encounter_id AS encounter_id`,
+        `MATCH (p:Patient {patient_id: $id})-[r:UNDERWENT]->(pr:ConceptProcedure)
+         RETURN pr.code AS code, pr.system AS system, pr.description AS description,
+                r.start_date AS start_date, r.stop_date AS stop_date,
+                r.reason_code AS reason_code, r.reason_description AS reason_description,
+                r.encounter_id AS encounter_id`,
         { id: patientId },
       ),
       this.query(
-        `MATCH (p:Patient {patient_id: $id})-[:HAS_ENCOUNTER]->(e:Encounter)
+        `MATCH (p:Patient {patient_id: $id})-[:HAD_ENCOUNTER]->(e:Encounter)
          RETURN e.encounter_id AS encounter_id, e.encounter_class AS encounter_class,
                 e.code AS code, e.description AS description,
                 e.start_date AS start_date, e.stop_date AS stop_date,
@@ -215,7 +203,6 @@ export class EhrGraphStore {
         zip: p.zip as string,
       },
       conditions: conditions.map((r) => ({
-        condition_id: r.condition_id as string,
         code: r.code as string,
         system: r.system as string,
         description: r.description as string,
@@ -224,7 +211,6 @@ export class EhrGraphStore {
         encounter_id: r.encounter_id as string,
       })),
       medications: medications.map((r) => ({
-        medication_id: r.medication_id as string,
         code: r.code as string,
         description: r.description as string,
         start_date: r.start_date as string,
@@ -234,7 +220,6 @@ export class EhrGraphStore {
         encounter_id: r.encounter_id as string,
       })),
       observations: observations.map((r) => ({
-        observation_id: r.observation_id as string,
         category: r.category as string,
         code: r.code as string,
         description: r.description as string,
@@ -245,7 +230,6 @@ export class EhrGraphStore {
         encounter_id: r.encounter_id as string,
       })),
       procedures: procedures.map((r) => ({
-        procedure_id: r.procedure_id as string,
         code: r.code as string,
         system: r.system as string,
         description: r.description as string,
@@ -280,7 +264,7 @@ export class EhrGraphStore {
     const params: Record<string, KuzuValue> = { id: patientId };
 
     if (opts?.active) {
-      filters.push("(m.stop_date IS NULL OR m.stop_date = '')");
+      filters.push("(r.stop_date IS NULL OR r.stop_date = '')");
     }
     if (opts?.name) {
       filters.push('m.description CONTAINS $name');
@@ -288,18 +272,17 @@ export class EhrGraphStore {
     }
 
     const rows = await this.query(
-      `MATCH (p:Patient)-[:HAS_MEDICATION]->(m:Medication)
+      `MATCH (p:Patient)-[r:PRESCRIBED]->(m:ConceptMedication)
        WHERE ${filters.join(' AND ')}
-       RETURN m.medication_id AS medication_id, m.code AS code,
-              m.description AS description, m.start_date AS start_date,
-              m.stop_date AS stop_date, m.reason_code AS reason_code,
-              m.reason_description AS reason_description, m.encounter_id AS encounter_id
-       ORDER BY m.start_date DESC`,
+       RETURN m.code AS code, m.description AS description,
+              r.start_date AS start_date, r.stop_date AS stop_date,
+              r.reason_code AS reason_code, r.reason_description AS reason_description,
+              r.encounter_id AS encounter_id
+       ORDER BY r.start_date DESC`,
       params,
     );
 
     return rows.map((r) => ({
-      medication_id: r.medication_id as string,
       code: r.code as string,
       description: r.description as string,
       start_date: r.start_date as string,
@@ -320,23 +303,22 @@ export class EhrGraphStore {
     const params: Record<string, KuzuValue> = { id: patientId };
 
     if (opts?.status === 'active') {
-      filters.push("(c.stop_date IS NULL OR c.stop_date = '')");
+      filters.push("(r.stop_date IS NULL OR r.stop_date = '')");
     } else if (opts?.status === 'resolved') {
-      filters.push("c.stop_date IS NOT NULL AND c.stop_date <> ''");
+      filters.push("r.stop_date IS NOT NULL AND r.stop_date <> ''");
     }
 
     const rows = await this.query(
-      `MATCH (p:Patient)-[:HAS_CONDITION]->(c:Condition)
+      `MATCH (p:Patient)-[r:DIAGNOSED_WITH]->(c:ConceptCondition)
        WHERE ${filters.join(' AND ')}
-       RETURN c.condition_id AS condition_id, c.code AS code, c.system AS system,
-              c.description AS description, c.start_date AS start_date,
-              c.stop_date AS stop_date, c.encounter_id AS encounter_id
-       ORDER BY c.start_date DESC`,
+       RETURN c.code AS code, c.system AS system, c.description AS description,
+              r.start_date AS start_date, r.stop_date AS stop_date,
+              r.encounter_id AS encounter_id
+       ORDER BY r.start_date DESC`,
       params,
     );
 
     return rows.map((r) => ({
-      condition_id: r.condition_id as string,
       code: r.code as string,
       system: r.system as string,
       description: r.description as string,
@@ -360,27 +342,26 @@ export class EhrGraphStore {
       params.code = opts.code;
     }
     if (opts?.startDate) {
-      filters.push('o.date >= $startDate');
+      filters.push('r.date >= $startDate');
       params.startDate = opts.startDate;
     }
     if (opts?.endDate) {
-      filters.push('o.date <= $endDate');
+      filters.push('r.date <= $endDate');
       params.endDate = opts.endDate;
     }
 
     const rows = await this.query(
-      `MATCH (p:Patient)-[:HAS_OBSERVATION]->(o:Observation)
+      `MATCH (p:Patient)-[r:HAS_RESULT]->(o:ConceptObservation)
        WHERE ${filters.join(' AND ')}
-       RETURN o.observation_id AS observation_id, o.category AS category,
-              o.code AS code, o.description AS description, o.value AS value,
-              o.units AS units, o.type AS type, o.date AS date,
-              o.encounter_id AS encounter_id
-       ORDER BY o.date DESC`,
+       RETURN o.code AS code, o.description AS description,
+              r.value AS value, r.units AS units, r.type AS type,
+              r.date AS date, r.category AS category,
+              r.encounter_id AS encounter_id
+       ORDER BY r.date DESC`,
       params,
     );
 
     return rows.map((r) => ({
-      observation_id: r.observation_id as string,
       category: r.category as string,
       code: r.code as string,
       description: r.description as string,
@@ -398,7 +379,6 @@ export class EhrGraphStore {
     patientId: string,
     opts: { fromType: string; fromId: string; toType: string; toId: string },
   ): Promise<TemporalRelationResult | null> {
-    // Resolve dates from the entities via their encounter start dates
     const fromDateQuery = this.dateQueryForType(opts.fromType, opts.fromId, patientId);
     const toDateQuery = this.dateQueryForType(opts.toType, opts.toId, patientId);
 
@@ -420,37 +400,43 @@ export class EhrGraphStore {
     return { from_date: fromDate, to_date: toDate, relation };
   }
 
-  private dateQueryForType(type: string, id: string, patientId: string) {
-    const params: Record<string, KuzuValue> = { id, pid: patientId };
+  private dateQueryForType(type: string, code: string, patientId: string) {
+    const params: Record<string, KuzuValue> = { code, pid: patientId };
     switch (type.toLowerCase()) {
       case 'condition':
         return {
-          cypher: `MATCH (c:Condition {condition_id: $id}) WHERE c.patient_id = $pid RETURN c.start_date AS date`,
+          cypher: `MATCH (p:Patient {patient_id: $pid})-[r:DIAGNOSED_WITH]->(c:ConceptCondition {code: $code})
+                   RETURN r.start_date AS date ORDER BY r.start_date LIMIT 1`,
           params,
         };
       case 'medication':
         return {
-          cypher: `MATCH (m:Medication {medication_id: $id}) WHERE m.patient_id = $pid RETURN m.start_date AS date`,
+          cypher: `MATCH (p:Patient {patient_id: $pid})-[r:PRESCRIBED]->(m:ConceptMedication {code: $code})
+                   RETURN r.start_date AS date ORDER BY r.start_date LIMIT 1`,
           params,
         };
       case 'observation':
         return {
-          cypher: `MATCH (o:Observation {observation_id: $id}) WHERE o.patient_id = $pid RETURN o.date AS date`,
+          cypher: `MATCH (p:Patient {patient_id: $pid})-[r:HAS_RESULT]->(o:ConceptObservation {code: $code})
+                   RETURN r.date AS date ORDER BY r.date LIMIT 1`,
           params,
         };
       case 'procedure':
         return {
-          cypher: `MATCH (pr:Procedure {procedure_id: $id}) WHERE pr.patient_id = $pid RETURN pr.start_date AS date`,
+          cypher: `MATCH (p:Patient {patient_id: $pid})-[r:UNDERWENT]->(pr:ConceptProcedure {code: $code})
+                   RETURN r.start_date AS date ORDER BY r.start_date LIMIT 1`,
           params,
         };
       case 'encounter':
         return {
-          cypher: `MATCH (e:Encounter {encounter_id: $id}) WHERE e.patient_id = $pid RETURN e.start_date AS date`,
+          cypher: `MATCH (e:Encounter {encounter_id: $code}) WHERE e.patient_id = $pid
+                   RETURN e.start_date AS date`,
           params,
         };
       default:
         return {
-          cypher: `MATCH (c:Condition {condition_id: $id}) WHERE c.patient_id = $pid RETURN c.start_date AS date`,
+          cypher: `MATCH (p:Patient {patient_id: $pid})-[r:DIAGNOSED_WITH]->(c:ConceptCondition {code: $code})
+                   RETURN r.start_date AS date ORDER BY r.start_date LIMIT 1`,
           params,
         };
     }
@@ -468,25 +454,22 @@ export class EhrGraphStore {
     const filters: string[] = [];
     const params: Record<string, KuzuValue> = {};
 
-    // Condition filter — require all listed conditions
     if (opts.conditions && opts.conditions.length > 0) {
       for (let i = 0; i < opts.conditions.length; i++) {
-        matchClauses.push(`MATCH (p)-[:HAS_CONDITION]->(c${i}:Condition)`);
+        matchClauses.push(`MATCH (p)-[:DIAGNOSED_WITH]->(c${i}:ConceptCondition)`);
         filters.push(`c${i}.description CONTAINS $cond${i}`);
         params[`cond${i}`] = opts.conditions[i];
       }
     }
 
-    // Medication filter
     if (opts.medications && opts.medications.length > 0) {
       for (let i = 0; i < opts.medications.length; i++) {
-        matchClauses.push(`MATCH (p)-[:HAS_MEDICATION]->(m${i}:Medication)`);
+        matchClauses.push(`MATCH (p)-[:PRESCRIBED]->(m${i}:ConceptMedication)`);
         filters.push(`m${i}.description CONTAINS $med${i}`);
         params[`med${i}`] = opts.medications[i];
       }
     }
 
-    // Gender filter
     if (opts.gender) {
       filters.push('p.gender = $gender');
       params.gender = opts.gender;
@@ -522,7 +505,6 @@ export class EhrGraphStore {
       zip: r.zip as string,
     }));
 
-    // Age filter (post-query since Kuzu lacks date arithmetic)
     if (opts.ageRange) {
       const now = new Date();
       results = results.filter((p) => {

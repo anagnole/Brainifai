@@ -1,226 +1,144 @@
 # Brainifai
 
-A Personal Knowledge Graph (PKG) that grows automatically from your daily tools and lets you query it through Claude.
-
-Data flows in from Slack, GitHub, ClickUp, and Apple Calendar, lands in a local Neo4j graph, and is exposed to Claude via MCP servers. Ask natural-language questions and get grounded context from your actual activity — people, topics, conversations, tasks, pull requests, calendar events. Manage tasks directly from Claude. Browse and configure everything through a local web UI.
-
----
-
-## Architecture
-
-![Brainifai Architecture](./architecture.png)
-
----
+A federated Personal Knowledge Graph (PKG) system. Data flows in from your work tools, gets routed by an AI orchestrator to specialized graph instances, and is served to Claude sessions via MCP.
 
 ## How it works
 
 ```
-Slack / GitHub / ClickUp / Apple Calendar
-   ↓  fetch messages, PRs, tasks, events, status changes (paginated, incremental)
-Ingestion pipeline
-   ↓  normalize → Person, Activity, Topic, Container nodes
-   ↓  MERGE into Neo4j (idempotent, re-run safe)
-   ↓  cursor per source/channel/list (only fetches new data next run)
-Neo4j (Docker, local)
-   ↑  Cypher: fulltext search, time windows, graph traversal
-MCP Servers (stdio)
-   ↑  brainifai   — 4 query tools (read-only, context retrieval)
-   ↑  clickup     — 6 task management tools (create, update, comment)
-   ↑  fal-images  — image generation via fal.ai
-Claude (Desktop or Claude Code)
+Slack / GitHub / Calendar / ClickUp
+   ↓  fetch + normalize (incremental, cursor-based)
+Global Instance (~/.brainifai/)
+   ↓  Ingestion pipeline → MERGE into Kuzu (idempotent)
+   ↓  AI Orchestrator classifies data, routes to children
+   ↓  Event Bus (data.push)
+   ↓
+   ├── Coding Instance     → PR summaries, decision logs
+   ├── Manager Instance    → people context, meeting summaries
+   ├── EHR Instance        → clinical queries (patients, meds, labs, conditions)
+   └── General Instance    → broad cross-topic search
+   ↓
+MCP Servers (stdio, per-instance)
+   ↓
+Claude Sessions (Desktop or Claude Code)
 ```
 
-### The graph model
+Each instance has its own Kuzu database, its own set of context functions, and its own MCP server entry. Instances self-describe via `config.json` so the orchestrator knows where to route data.
 
-Everything is **Entities** + **Activities**.
+## Architecture
 
-| Node | Unique key | What it represents |
-|------|-----------|-------------------|
-| `Person` | `person_key` (e.g. `slack:U12345`, `github:octocat`) | A human across sources |
-| `Activity` | `(source, source_id)` | A single message / PR / task / event / status change |
-| `Topic` | `name` (lowercase) | A keyword, hashtag, label, or task status |
-| `Container` | `(source, container_id)` | A Slack channel, GitHub repo, ClickUp list, or calendar |
-| `SourceAccount` | `(source, account_id)` | A tool-specific identity, linked to a Person |
-| `Cursor` | `(source, container_id)` | Tracks ingestion progress per source |
-
-**Activity kinds**: `message`, `task`, `task_comment`, `status_change`, `pull_request`, `pr_comment`, `pr_review`, `doc`, `calendar_event`
-
-### Incremental ingestion
-
-On first run, ingestion backfills the last `BACKFILL_DAYS` (default: 7) of data per source. On every subsequent run it only fetches data newer than the last cursor. Cursors live in Neo4j — wiping the database resets them and triggers a clean backfill automatically.
-
-All sources are optional — each is skipped if its credentials are not set in `.env`.
-
-### MCP tools
-
-**brainifai** — context retrieval (read-only)
-
-| Tool | What it does |
-|------|-------------|
-| `get_context_packet` | **Primary tool.** Given a query, finds matching entities, gathers structural facts, pulls time-windowed evidence. Returns a bounded JSON payload. |
-| `search_entities` | Fulltext search across Person, Topic, Container nodes. |
-| `get_entity_summary` | Activity count, most recent activity, top connections for one entity. |
-| `get_recent_activity` | Time-windowed activity feed, filterable by person, topic, or channel. |
-
-Safety limits are always enforced: max 20 evidence items, max 8,000 chars total, 10s query timeout.
-
-**clickup** — task management (read + write)
-
-| Tool | What it does |
-|------|-------------|
-| `get_lists` | Lists configured ClickUp lists with names and available statuses. |
-| `list_tasks` | Lists tasks in a list, with optional status filter. |
-| `get_task` | Gets full task detail by ID (description, assignees, etc.). |
-| `create_task` | Creates a new task (name, description, status, priority, due date, assignees). |
-| `update_task` | Updates any field on an existing task. |
-| `add_comment` | Adds a comment to a task. |
-
-### Topic extraction
-
-Topics are extracted from every activity:
-1. **Hashtags** — `#deploy`, `#incident`, etc.
-2. **GitHub labels** — label names are automatically added as topics.
-3. **Allowlist matching** — configurable list of keywords (case-insensitive), set via `TOPIC_ALLOWLIST`.
-4. **Task status** — ClickUp task statuses (e.g. `in-progress`, `done`) are stored as topics automatically.
-
----
-
-## Admin UI
-
-A local web interface for configuring sources, running ingestion, and browsing the knowledge graph.
-
-```bash
-npm run ui     # starts at http://localhost:3000
+```
+src/
+  context/          Context function registry, per-instance resolution
+    functions/      Base tools + template-specific + EHR clinical tools
+  event-bus/        File-based pub/sub for inter-instance messaging
+  graphstore/       Kuzu adapter, on-demand wrapper, EHR schema
+  hooks/            PreToolUse (KG context injection), SessionStart
+  ingestion/        Slack/GitHub/Calendar connectors, normalize, upsert, cursor
+  instance/         Instance model, templates, init, resolve, lifecycle
+  mcp/              MCP server, instance-aware tool registration
+  orchestrator/     AI classifier, router, data delivery
+  shared/           Constants, logger, graphstore singleton
+  api/              Fastify API server (graph visualization)
+  viz/              React + Sigma.js graph visualization UI
+  scripts/          Utilities (test-connection, seed-schema)
+bin/
+  brainifai.js      CLI entrypoint
 ```
 
-| Page | What it does |
-|------|-------------|
-| **Dashboard** | Entity counts, source status, last ingestion timestamps per source. |
-| **Sources** | Credential forms for all sources — saves directly to `.env`. Lists available Apple Calendars. |
-| **Ingest** | Manual ingestion trigger with live log streaming. Auto-ingest scheduler (configurable interval, on/off toggle). |
-| **Explore** | Browse all entities, search by name, filter by type. Click any entity to see its recent activity feed. |
+## Graph model
 
-The scheduler runs inside the UI server process — enabling it means ingestion runs automatically on a timer as long as the UI is open.
+**Base schema** (all instances):
 
----
+| Node | Key | Represents |
+|------|-----|------------|
+| `Person` | `person_key` | A human across sources (`slack:U123`, `github:user`) |
+| `Activity` | `(source, source_id)` | A message, PR, task, or calendar event |
+| `Topic` | `name` | A keyword, hashtag, or label |
+| `Container` | `(source, container_id)` | A channel, repo, list, or calendar |
+
+**EHR schema** (clinical instances):
+
+| Node | Key | Represents |
+|------|-----|------------|
+| `Patient` | `patient_id` | Demographics, birthdate, gender |
+| `Encounter` | `encounter_id` | A clinical visit |
+| `Condition` | `condition_id` | Diagnosis with onset/resolution dates |
+| `Medication` | `medication_id` | Prescription with start/stop dates |
+| `Observation` | `observation_id` | Lab result with value and units |
+| `Procedure` | `procedure_id` | Clinical procedure with date |
+| `Provider` | `provider_id` | Clinician or organization |
+
+## Instance types
+
+Instances are bootstrapped from templates that configure which context functions are active:
+
+| Type | Context functions |
+|------|-------------------|
+| **coding** | Base 5 + `get_pr_summary`, `get_decision_log` |
+| **manager** | Base 5 + `get_people_context`, `get_meeting_summary` |
+| **ehr** | `search_patients`, `get_patient_summary`, `get_medications`, `get_diagnoses`, `get_labs`, `get_temporal_relation`, `find_cohort` |
+| **general** | Base 5 (broad context, cross-topic) |
+
+Base tools available to all non-EHR instances: `search_entities`, `get_entity_summary`, `get_recent_activity`, `get_context_packet`, `ingest_memory`.
 
 ## Setup
 
 ### Prerequisites
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- [Node.js](https://nodejs.org/) 20+
+- Node.js 20+
 
-### 1. Clone and install
+### Install
 
 ```bash
 git clone <repo-url>
 cd Brainifai
 npm install
-cd ui && npm install && cd ..
-```
-
-### 2. Configure environment
-
-```bash
 cp .env.example .env
 ```
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `NEO4J_URI` | Yes | Bolt connection URI (default: `bolt://localhost:7687`) |
-| `NEO4J_USER` | Yes | Neo4j username (default: `neo4j`) |
-| `NEO4J_PASSWORD` | Yes | Neo4j password |
-| `SLACK_BOT_TOKEN` | No | Slack bot token (`xoxb-...`) |
-| `SLACK_CHANNEL_IDS` | No | Comma-separated Slack channel IDs |
-| `GITHUB_TOKEN` | No | GitHub personal access token (`ghp_...`) |
-| `GITHUB_REPOS` | No | Comma-separated repos (`owner/repo,owner/repo2`) |
-| `CLICKUP_TOKEN` | No | ClickUp API token (`pk_...`) |
-| `CLICKUP_LIST_IDS` | No | Comma-separated ClickUp list IDs |
-| `APPLE_CALDAV_USERNAME` | No | Apple ID email address |
-| `APPLE_CALDAV_PASSWORD` | No | App-specific password (see setup below) |
-| `APPLE_CALDAV_CALENDARS` | No | Comma-separated calendar names to include (empty = all) |
-| `BACKFILL_DAYS` | No | Days to backfill on first run (default: `7`) |
-| `TOPIC_ALLOWLIST` | No | Comma-separated keywords for topic extraction |
+### Configure sources
 
-### 3. Start Neo4j
+All sources are optional — each is skipped if its credentials are not set.
 
-```bash
-docker compose up -d
-npm run test-connection    # should print "Connected to Neo4j"
-npm run schema             # create constraints and fulltext index
-```
+| Variable | Description |
+|----------|-------------|
+| `KUZU_DB_PATH` | Override default DB path (`~/.brainifai/data/kuzu`) |
+| `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) |
+| `SLACK_CHANNEL_IDS` | Comma-separated Slack channel IDs |
+| `GITHUB_TOKEN` | GitHub personal access token |
+| `GITHUB_REPOS` | Comma-separated repos (`owner/repo`) |
+| `CLICKUP_TOKEN` | ClickUp API token |
+| `CLICKUP_LIST_IDS` | Comma-separated ClickUp list IDs |
+| `BACKFILL_DAYS` | Days to backfill on first run (default: `7`) |
+| `TOPIC_ALLOWLIST` | Comma-separated keywords for topic extraction |
 
-### 4. Set up data sources (all optional)
-
-#### Slack
-
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → From scratch
-2. **OAuth & Permissions → Bot Token Scopes** → add `channels:history`, `channels:read`
-3. **Install to Workspace** → copy the `xoxb-...` token into `.env`
-4. Invite the bot to each channel: `/invite @your-bot-name`
-5. Get channel IDs: click the channel name in Slack → copy the ID at the bottom
-
-#### GitHub
-
-1. GitHub → **Settings → Developer settings → Personal access tokens → Tokens (classic)**
-2. Generate a token with `repo` (or `public_repo`) and `read:user` scopes
-3. Set `GITHUB_TOKEN` and `GITHUB_REPOS` in `.env`
-
-#### ClickUp
-
-1. ClickUp → **Settings → Apps → API Token** → copy the `pk_...` token
-2. Get list IDs from the URL when viewing a list: `.../list/{LIST_ID}`
-3. Set `CLICKUP_TOKEN` and `CLICKUP_LIST_IDS` in `.env`
-
-Ingests: tasks (name + description), comments, docs, and **full status change history**.
-
-#### Apple Calendar
-
-1. Go to [appleid.apple.com](https://appleid.apple.com) → **Sign-In and Security → App-Specific Passwords** → generate one
-2. Set `APPLE_CALDAV_USERNAME` (your Apple ID email) and `APPLE_CALDAV_PASSWORD` (the app-specific password) in `.env`
-3. Optionally set `APPLE_CALDAV_CALENDARS` to limit which calendars are ingested
-
-Connects via CalDAV to iCloud. Fetches events from `BACKFILL_DAYS` ago through 30 days into the future.
-
-To list available calendar names before configuring:
-```bash
-npm run list-calendars
-```
-
-### 5. Run ingestion
+### Initialize
 
 ```bash
-npm run ingest
+# Initialize the global instance (creates ~/.brainifai/)
+bin/brainifai.js init
+
+# Initialize a project instance
+cd ~/Projects/MyProject
+brainifai init --type coding --name my-project
 ```
 
-Re-run anytime — only new data is fetched. Or use the **Ingest** page in the admin UI to trigger and watch live logs, and enable the auto-scheduler.
+### Run
 
----
+```bash
+npm run ingest              # Fetch new data, upsert to graph
+npm run mcp                 # Start MCP server (stdio)
+npm run schema              # Create/update graph indexes
+npm run test-connection     # Verify DB connectivity
+npx tsc --noEmit            # Type check
+npm test                    # Run tests (vitest)
+```
 
 ## Using with Claude
 
-### Claude Code (recommended)
+### Claude Code
 
-Add to `~/.claude.json` so the MCP servers are available in every project:
-
-```bash
-# Knowledge graph (read-only context retrieval)
-claude mcp add brainifai --scope user -- npx tsx \
-  --env-file=/absolute/path/to/Brainifai/.env \
-  /absolute/path/to/Brainifai/src/mcp/index.ts
-
-# ClickUp task management
-claude mcp add clickup --scope user -- npx tsx \
-  --env-file=/absolute/path/to/Brainifai/.env \
-  /absolute/path/to/Brainifai/src/mcp-clickup/index.ts
-```
-
-Or use the project-local `.mcp.json` (already configured) — servers are available automatically when working in this repo.
-
-### Claude Desktop
-
-Configure in `~/Library/Application Support/Claude/claude_desktop_config.json`:
+The global MCP server is configured in `~/.claude/settings.json`. For project-specific instances, add a `.mcp.json` in the project root:
 
 ```json
 {
@@ -228,94 +146,36 @@ Configure in `~/Library/Application Support/Claude/claude_desktop_config.json`:
     "brainifai": {
       "command": "npx",
       "args": ["tsx", "--env-file=.env", "src/mcp/index.ts"],
-      "cwd": "/absolute/path/to/Brainifai"
-    },
-    "clickup": {
-      "command": "npx",
-      "args": ["tsx", "--env-file=.env", "src/mcp-clickup/index.ts"],
-      "cwd": "/absolute/path/to/Brainifai"
+      "cwd": "/path/to/Brainifai",
+      "env": {
+        "GRAPHSTORE_ON_DEMAND": "true",
+        "GRAPHSTORE_READONLY": "true",
+        "KUZU_DB_PATH": "/path/to/project/.brainifai/data/kuzu",
+        "BRAINIFAI_INSTANCE_PATH": "/path/to/project/.brainifai"
+      }
     }
   }
 }
 ```
 
-### Example queries
+The `BRAINIFAI_INSTANCE_PATH` env var tells the MCP server which instance to resolve, so it registers the correct context functions for that project.
 
-> *"What has the team been discussing about deployments this week?"*
-> *"Who are the most active people in #engineering?"*
-> *"What PRs have been merged in myrepo recently?"*
-> *"Which ClickUp tasks moved to done this week?"*
-> *"What meetings do I have coming up that mention the API migration?"*
-> *"Create a ClickUp task called 'Fix login bug' in the Phase 1 list, high priority"*
-> *"Get a context packet for the incident we had last Friday"*
+## Multi-instance architecture
 
----
+The system is built around a tree of instances coordinated by a global orchestrator:
 
-## Commands reference
+- **Global instance** (`~/.brainifai/`) — ingests from all external sources, maintains a registry of children, runs the orchestrator
+- **Project instances** (`<project>/.brainifai/`) — specialized DBs and tools scoped to a project
+- **Event bus** — file-based pub/sub for `data.push`, `instance.registered`, `query.request/response` messages
+- **Orchestrator** — AI-powered classifier (Claude Haiku) that reads instance descriptions and routes ingested data to matching children
+- **Context functions** — composable, per-instance tools registered in a global registry and activated based on instance config/template
 
-```bash
-docker compose up -d        # Start Neo4j
-docker compose down         # Stop Neo4j (data persists in volume)
-docker compose down -v      # Stop + wipe all data (triggers fresh backfill on next ingest)
+## Key design decisions
 
-npm run test-connection     # Verify Neo4j connectivity
-npm run schema              # Create/update constraints and indexes
-npm run ingest              # Fetch new data from all configured sources
-npm run list-calendars      # List available Apple Calendar names
-
-npm run mcp                 # Start knowledge graph MCP server (stdio)
-npm run mcp-clickup         # Start ClickUp task management MCP server (stdio)
-npm run mcp-fal             # Start fal.ai image generation MCP server (stdio)
-
-npm run ui                  # Start admin UI at http://localhost:3000
-
-npx tsc --noEmit            # Type check
-```
-
----
-
-## Project structure
-
-```
-src/
-  shared/                 Neo4j driver, canonical types, schema, constants
-  ingestion/
-    slack/                Slack connector (messages, threads)
-    github/               GitHub connector (PRs, comments, reviews)
-    clickup/              ClickUp connector (tasks, comments, docs, status changes)
-    apple-calendar/       Apple Calendar connector (CalDAV/iCloud)
-    topic-extractor.ts    Hashtag + allowlist topic extraction
-    upsert.ts             Source-agnostic MERGE-based upsert
-    cursor.ts             Incremental ingestion state
-    index.ts              Ingestion entry point
-  mcp/                    Knowledge graph MCP server (4 read-only tools)
-  mcp-clickup/            ClickUp task management MCP server (6 tools)
-    client.ts             ClickUp REST API client
-    tools/                get-lists, list-tasks, get-task, create-task, update-task, add-comment
-    server.ts             MCP server assembly
-    index.ts              stdio entry point
-  mcp-fal/                fal.ai image generation MCP server
-  scripts/                One-off utilities (test-connection, seed-schema, list-calendars)
-ui/
-  app/                    Next.js App Router pages (dashboard, sources, ingest, explore)
-  app/api/                API routes (config, ingest SSE, entities, activity, scheduler, calendars)
-  components/             Nav sidebar
-  lib/                    Neo4j driver, env reader/writer, scheduler
-  instrumentation.ts      Starts scheduler on server boot
-docker-compose.yml
-.mcp.json                 Project-local MCP server config (brainifai, clickup, fal-images)
-.env.example
-```
-
----
-
-## Adding more data sources
-
-The pipeline is designed to be extended. To add a new source:
-
-1. Create `src/ingestion/<source>/` with `types.ts`, `config.ts`, `client.ts`, `normalize.ts` — mirror the `clickup/` structure
-2. Map to `NormalizedMessage` from `src/shared/types.ts`
-3. Use the existing `upsertBatch()` and `setCursor()` functions — fully source-agnostic
-4. Add a guarded block in `src/ingestion/index.ts` (skip if token not set)
-
-The graph model handles multi-source identity naturally: one `Person` node can link to multiple `SourceAccount` nodes across different tools.
+- All ingestion uses `MERGE` — safe to re-run, no duplicates
+- Cursors stored in graph DB — wipe DB = clean re-backfill
+- MCP exposes curated tools only, no raw Cypher to the LLM
+- Safety limits: `MAX_EVIDENCE=20`, `MAX_TOTAL_CHARS=8000`, `QUERY_TIMEOUT=10s`
+- Kuzu (embedded) — no Docker, no external DB process
+- OnDemand graph store for MCP/hooks — avoids write lock contention with ingestion
+- Each instance self-describes so the orchestrator can route without hardcoded rules

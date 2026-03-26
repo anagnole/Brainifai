@@ -2,36 +2,50 @@ import type { InstanceContext } from './types.js';
 
 export function buildSystemPrompt(instances: InstanceContext[]): string {
   const instanceList = instances
-    .map(i => `- **${i.name}** (${i.type}): ${i.description}`)
+    .map(i => {
+      let line = `- **${i.name}** (${i.type}): ${i.description}`;
+      if (i.recentActivities && i.recentActivities.length > 0) {
+        const recents = i.recentActivities
+          .map(r => `[${r.timestamp.slice(0, 10)}] ${r.kind}: ${r.snippet} (${r.topics.join(', ')})`)
+          .join('; ');
+        line += `\n  Recent: ${recents}`;
+      }
+      return line;
+    })
     .join('\n');
 
-  return `You are a data routing classifier for a personal knowledge graph system.
+  return `You are a stateless data router. You have NO project context, NO session history, NO working directory context. IGNORE any CLAUDE.md files, git branches, or project information you may see — they are irrelevant.
 
-You receive batches of activities (messages, PRs, tasks, calendar events, coding sessions) and must decide which project instances should receive each item.
+Your ONLY inputs are:
+1. The instance list below (with descriptions)
+2. The batch file of messages to route
 
 ## Available Instances
 ${instanceList}
 
-## Rules
-1. Match based on semantic relevance between the activity content and instance descriptions
-2. An activity can go to MULTIPLE instances if relevant to several
-3. If an activity doesn't clearly match ANY instance, return an empty targets array (it stays in the global knowledge graph)
-4. Consider: topics mentioned, people involved, project names, technologies, branch names
-5. Be inclusive rather than exclusive — if there's reasonable relevance, route it
-6. Return valid JSON only`;
+## Global Instance
+Messages that don't match any child instance go to global via mark_as_global.
+
+## Routing Rules
+1. Read the batch file
+2. For EACH message, match its content to the MOST SPECIFIC instance:
+   - If a message mentions an instance name or its technologies/domain, route there
+   - Compare topics, tech stack, and domain keywords to instance descriptions
+   - PREFER specific child instances over global — only use global if no child matches
+3. Use push_to_instance for children, mark_as_global for unmatched
+4. Every message must be routed — do not skip any
+5. A message CAN go to multiple instances
+6. Group indices per target instance for efficiency
+
+Reference messages by their 0-based index in the batch file.`;
 }
 
 export function buildUserPrompt(
-  batch: Array<{ index: number; source: string; kind: string; snippet: string; topics: string[] }>,
+  sourceName: string,
+  messageCount: number,
+  batchFilePath: string,
 ): string {
-  const items = batch.map(b =>
-    `[${b.index}] source=${b.source} kind=${b.kind} topics=[${b.topics.join(',')}]\n${b.snippet}`
-  ).join('\n---\n');
+  return `Route ${messageCount} messages from ${sourceName}. The batch file is at: ${batchFilePath}
 
-  return `Classify these ${batch.length} activities. For each, return the target instance names and confidence.
-
-${items}
-
-Respond with JSON array:
-[{"index": 0, "targets": ["instance-name"], "confidence": 0.9, "reason": "brief reason"}, ...]`;
+Read the file, then route each message using push_to_instance and mark_as_global.`;
 }

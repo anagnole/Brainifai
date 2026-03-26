@@ -1,21 +1,16 @@
 /**
  * EHR context functions — 7 clinical query tools for the EHR instance type.
  *
- * These bypass the base GraphStore (Person/Activity schema) and use
- * EhrGraphStore directly. Each call opens a short-lived read-only connection
- * to avoid holding persistent locks.
+ * Uses shared concept node model. Clinical data on relationship properties.
  */
 
 import { z } from 'zod';
 import type { ContextFunction } from '../types.js';
 import { EhrGraphStore } from '../../graphstore/kuzu/ehr-adapter.js';
 import { resolveInstanceDbPath } from '../../instance/resolve.js';
-import { resolve } from 'path';
 
-/** Open a short-lived read-only EhrGraphStore, run a callback, then close. */
 async function withEhrStore<T>(fn: (store: EhrGraphStore) => Promise<T>): Promise<T> {
-  const instancePath = resolveInstanceDbPath();
-  const dbPath = resolve(instancePath, 'data', 'kuzu');
+  const dbPath = resolveInstanceDbPath();
   const store = new EhrGraphStore({ dbPath, readOnly: true });
   try {
     return await fn(store);
@@ -63,10 +58,10 @@ export const patientSummaryFn: ContextFunction = {
         ...summary,
         record_ids: [
           summary.patient.patient_id,
-          ...summary.conditions.map((c) => c.condition_id),
-          ...summary.medications.map((m) => m.medication_id),
-          ...summary.observations.map((o) => o.observation_id),
-          ...summary.procedures.map((p) => p.procedure_id),
+          ...summary.conditions.map((c) => c.code),
+          ...summary.medications.map((m) => m.code),
+          ...summary.observations.map((o) => o.code),
+          ...summary.procedures.map((p) => p.code),
           ...summary.encounters.map((e) => e.encounter_id),
         ],
       };
@@ -91,7 +86,7 @@ export const medicationsFn: ContextFunction = {
       return {
         patient_id,
         medications,
-        record_ids: medications.map((m) => m.medication_id),
+        record_ids: medications.map((m) => m.code),
       };
     });
   },
@@ -114,7 +109,7 @@ export const diagnosesFn: ContextFunction = {
       return {
         patient_id,
         conditions,
-        record_ids: conditions.map((c) => c.condition_id),
+        record_ids: conditions.map((c) => c.code),
       };
     });
   },
@@ -142,7 +137,7 @@ export const labsFn: ContextFunction = {
       return {
         patient_id,
         labs,
-        record_ids: labs.map((l) => l.observation_id),
+        record_ids: labs.map((l) => l.code),
       };
     });
   },

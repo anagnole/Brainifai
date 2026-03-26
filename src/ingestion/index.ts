@@ -1,6 +1,6 @@
 import { writeFileSync, mkdirSync } from 'fs';
 import { resolve, dirname } from 'path';
-import { getGraphStore, closeGraphStore } from '../shared/graphstore.js';
+import { getGraphStore, getGlobalGraphStore, closeGraphStore } from '../shared/graphstore.js';
 import { UPSERT_BATCH_SIZE } from '../shared/constants.js';
 import { logger } from '../shared/logger.js';
 import { getSlackConfig } from './slack/config.js';
@@ -667,63 +667,111 @@ async function writeStatusFile(store: GraphStore, status: 'success' | 'error') {
 }
 
 async function main() {
-  // Ingestion always needs write access regardless of GRAPHSTORE_READONLY
+  // Ingestion always targets global and needs write access
   process.env.GRAPHSTORE_READONLY = 'false';
-  const store = await getGraphStore();
+  const store = await getGlobalGraphStore();
   await store.initialize();
 
-  // Collect configured source ingestion functions
-  const sources: Array<{ name: string; fn: () => Promise<void> }> = [];
+  // Check for child instances to determine if orchestrator should route data
+  let children: import('../orchestrator/types.js').InstanceContext[] = [];
+  try {
+    const { listInstances } = await import('../instance/registry.js');
+    const { readInstanceConfig } = await import('../instance/resolve.js');
+    const registryEntries = await listInstances({ status: 'active' });
+    children = registryEntries
+      .filter(e => e.name !== 'global')
+      .map(e => {
+        let description = e.description;
+        let recentActivities;
+        try {
+          const config = readInstanceConfig(e.path);
+          description = config.description ?? description;
+          recentActivities = config.recentActivities;
+        } catch { /* ignore */ }
+        return { name: e.name, type: e.type, description, path: e.path, recentActivities };
+      });
+  } catch {
+    // No global instance or registry — no children
+  }
+
+  // Build source lists
+  type SourceDef = {
+    name: string;
+    ingestFn: () => Promise<void>;
+    collectFn: () => Promise<NormalizedMessage[]>;
+  };
+  const sources: SourceDef[] = [];
 
   if (process.env.SLACK_BOT_TOKEN) {
-    sources.push({ name: 'Slack', fn: () => ingestSlack(store) });
+    sources.push({ name: 'Slack', ingestFn: () => ingestSlack(store), collectFn: () => collectSlack(store) });
   } else {
     logger.info('SLACK_BOT_TOKEN not set — skipping Slack ingestion');
   }
 
   if (process.env.GITHUB_TOKEN) {
-    sources.push({ name: 'GitHub', fn: () => ingestGitHub(store) });
+    sources.push({ name: 'GitHub', ingestFn: () => ingestGitHub(store), collectFn: () => collectGitHub(store) });
   } else {
     logger.info('GITHUB_TOKEN not set — skipping GitHub ingestion');
   }
 
   if (process.env.CLICKUP_TOKEN) {
-    sources.push({ name: 'ClickUp', fn: () => ingestClickUp(store) });
+    sources.push({ name: 'ClickUp', ingestFn: () => ingestClickUp(store), collectFn: () => collectClickUp(store) });
   } else {
     logger.info('CLICKUP_TOKEN not set — skipping ClickUp ingestion');
   }
 
   if (process.env.APPLE_CALDAV_USERNAME) {
-    sources.push({ name: 'Apple Calendar', fn: () => ingestAppleCalendar(store) });
+    sources.push({ name: 'Apple Calendar', ingestFn: () => ingestAppleCalendar(store), collectFn: () => collectAppleCalendar(store) });
   } else {
     logger.info('APPLE_CALDAV_USERNAME not set — skipping Apple Calendar ingestion');
   }
 
-  // Claude Code: always enabled if projects path exists (local files, no token needed)
   const ccProjectsPath = process.env.CLAUDE_CODE_PROJECTS_PATH
     ?? `${process.env.HOME}/.claude/projects`;
   if (existsSync(ccProjectsPath)) {
-    sources.push({ name: 'Claude Code', fn: () => ingestClaudeCode(store) });
+    sources.push({ name: 'Claude Code', ingestFn: () => ingestClaudeCode(store), collectFn: () => collectClaudeCode(store) });
   } else {
     logger.info('Claude Code projects path not found — skipping');
   }
 
-  // Run all sources in parallel
-  const results = await Promise.allSettled(sources.map((s) => s.fn()));
+  if (children.length > 0) {
+    // Orchestrated mode: collect from each source, then route via Claude CLI
+    const { orchestrateSource } = await import('../orchestrator/index.js');
+    logger.info({ childCount: children.length }, 'Child instances found — using orchestrated routing');
 
-  // Report per-source results
-  for (let i = 0; i < sources.length; i++) {
-    const result = results[i];
-    if (result.status === 'rejected') {
-      logger.error({ source: sources[i].name, err: result.reason }, 'Source ingestion failed');
-      console.error(`${sources[i].name}: FAILED — ${result.reason?.message ?? result.reason}`);
+    for (const source of sources) {
+      try {
+        const messages = await source.collectFn();
+        if (messages.length > 0) {
+          const result = await orchestrateSource(source.name, messages, children);
+          console.log(`${source.name}: ${result.routedToChildren} to children, ${result.routedToGlobal} to global, ${result.fallbackToGlobal} fallback`);
+          if (result.errors.length > 0) {
+            console.error(`  Errors: ${result.errors.join('; ')}`);
+          }
+        } else {
+          console.log(`${source.name}: no new data`);
+        }
+      } catch (err) {
+        logger.error({ source: source.name, err }, 'Source collection/orchestration failed');
+        console.error(`${source.name}: FAILED — ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  } else {
+    // Direct mode: ingest straight to global (no children to route to)
+    const results = await Promise.allSettled(sources.map((s) => s.ingestFn()));
+
+    for (let i = 0; i < sources.length; i++) {
+      const result = results[i];
+      if (result.status === 'rejected') {
+        logger.error({ source: sources[i].name, err: result.reason }, 'Source ingestion failed');
+        console.error(`${sources[i].name}: FAILED — ${result.reason?.message ?? result.reason}`);
+      }
     }
   }
 
-  const anyFailed = results.some((r) => r.status === 'rejected');
-  await writeStatusFile(store, anyFailed ? 'error' : 'success');
+  await writeStatusFile(store, 'success');
   await closeGraphStore();
-  console.log(`Ingestion complete (${results.filter((r) => r.status === 'fulfilled').length}/${sources.length} sources succeeded)`);
+  console.log('Ingestion complete');
 }
 
 main().catch(async (err) => {

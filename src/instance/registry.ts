@@ -15,12 +15,19 @@ async function ensureSchema(conn: InstanceType<typeof kuzu.Connection>): Promise
   await conn.query(`CREATE REL TABLE IF NOT EXISTS PARENT_OF (FROM Instance TO Instance)`);
 }
 
-/** Open a short-lived connection to the global DB */
-async function openGlobalDb(): Promise<{ db: InstanceType<typeof kuzu.Database>; conn: InstanceType<typeof kuzu.Connection> }> {
+/** Open a short-lived connection to the global DB.
+ *  Use readOnly=true for queries — allows concurrent access when another process holds the DB. */
+async function openGlobalDb(readOnly = false): Promise<{ db: InstanceType<typeof kuzu.Database>; conn: InstanceType<typeof kuzu.Connection> }> {
   const globalDbPath = resolve(GLOBAL_BRAINIFAI_PATH, 'data', 'kuzu');
-  const db = new kuzu.Database(globalDbPath, 0, true, false);
-  const conn = new kuzu.Connection(db);
-  return { db, conn };
+  const db = new kuzu.Database(globalDbPath, 0, true, readOnly);
+  let conn: InstanceType<typeof kuzu.Connection>;
+  try {
+    conn = new kuzu.Connection(db);
+  } catch (err) {
+    db.close(); // prevent dangling native handle / unhandled rejection
+    throw err;
+  }
+  return { db, conn: conn! };
 }
 
 /** Parse a row from a Kuzu Instance query into an InstanceRegistryEntry */
@@ -145,26 +152,21 @@ export async function syncDescription(name: string, description: string): Promis
 
 /** List all registered instances from global graph */
 export async function listInstances(opts?: { status?: string }): Promise<InstanceRegistryEntry[]> {
-  const { db, conn } = await openGlobalDb();
+  const { db, conn } = await openGlobalDb(true); // read-only: compatible with concurrent readers
 
   try {
-    await ensureSchema(conn);
-
-    let cypher: string;
     let result;
-
     if (opts?.status) {
-      cypher = 'MATCH (n:Instance) WHERE n.status = $status RETURN n.*';
-      const ps = await conn.prepare(cypher);
+      const ps = await conn.prepare('MATCH (n:Instance) WHERE n.status = $status RETURN n.*');
       result = await conn.execute(ps, { status: opts.status });
     } else {
-      cypher = 'MATCH (n:Instance) RETURN n.*';
-      result = await conn.query(cypher);
+      result = await conn.query('MATCH (n:Instance) RETURN n.*');
     }
-
     const res = Array.isArray(result) ? result[0] : result;
     const rows = await res.getAll() as Record<string, unknown>[];
     return rows.map(rowToEntry);
+  } catch {
+    return []; // table doesn't exist yet or read error
   } finally {
     conn.close();
     db.close();
@@ -173,17 +175,17 @@ export async function listInstances(opts?: { status?: string }): Promise<Instanc
 
 /** Get a single instance by name */
 export async function getInstanceByName(name: string): Promise<InstanceRegistryEntry | null> {
-  const { db, conn } = await openGlobalDb();
+  const { db, conn } = await openGlobalDb(true); // read-only
 
   try {
-    await ensureSchema(conn);
     const ps = await conn.prepare('MATCH (n:Instance {name: $name}) RETURN n.*');
     const raw = await conn.execute(ps, { name });
     const result = Array.isArray(raw) ? raw[0] : raw;
     const rows = await result.getAll() as Record<string, unknown>[];
-
     if (rows.length === 0) return null;
     return rowToEntry(rows[0]);
+  } catch {
+    return null;
   } finally {
     conn.close();
     db.close();
@@ -198,10 +200,9 @@ export async function findInstancesByType(type: string): Promise<InstanceRegistr
 
 /** Search instances by description using FTS */
 export async function searchInstances(query: string): Promise<InstanceRegistryEntry[]> {
-  const { db, conn } = await openGlobalDb();
+  const { db, conn } = await openGlobalDb(true); // read-only
 
   try {
-    await ensureSchema(conn);
     const ps = await conn.prepare(`
       CALL QUERY_FTS_INDEX('Instance', 'instance_fts', $query, top_k := 10)
       RETURN node.name AS name, node.type AS type, node.description AS description,

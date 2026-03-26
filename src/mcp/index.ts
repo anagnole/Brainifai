@@ -5,17 +5,47 @@ import { getGraphStore, closeGraphStore } from '../shared/graphstore.js';
 import { logger } from '../shared/logger.js';
 import { initEventBus, closeEventBus } from '../event-bus/index.js';
 import { registerGlobalSubscriptions } from '../event-bus/global-subscriptions.js';
+import { listInstances } from '../instance/registry.js';
+import { setChildrenCache } from './children-cache.js';
+
+// Catch native Kuzu errors that can escape as unhandled rejections (e.g. lock contention).
+// Without this, Node.js v24+ crashes the process instead of allowing graceful recovery.
+process.on('unhandledRejection', (err) => {
+  logger.warn({ err }, 'MCP server: unhandled rejection (non-fatal)');
+});
 
 async function main() {
   // Force on-demand mode so the MCP server doesn't hold a persistent Kuzu lock.
-  // This allows ingest_memory (and batch ingestion) to open write connections.
   process.env.GRAPHSTORE_ON_DEMAND = 'true';
 
   // Resolve instance context before anything else
   const ctx = resolveMcpContext();
 
-  // Initialize GraphStore so queries are ready
-  const store = await getGraphStore();
+  // Query the registry for children BEFORE opening the GraphStore.
+  // This avoids Kuzu connection conflicts when ingest_memory needs the list later.
+  try {
+    const { readInstanceConfig } = await import('../instance/resolve.js');
+    const entries = await listInstances({ status: 'active' });
+    const children = entries
+      .filter(e => e.name !== 'global')
+      .map(e => {
+        let description = e.description;
+        let recentActivities;
+        try {
+          const config = readInstanceConfig(e.path);
+          description = config.description ?? description;
+          recentActivities = config.recentActivities;
+        } catch { /* ignore */ }
+        return { name: e.name, type: e.type, description, path: e.path, recentActivities };
+      });
+    setChildrenCache(children);
+    logger.info({ childCount: children.length }, 'Cached instance registry for orchestrator');
+  } catch (err) {
+    logger.warn({ err }, 'Could not query instance registry — ingest_memory will use direct write');
+  }
+
+  // Initialize GraphStore — use the resolved instance DB path explicitly
+  const store = await getGraphStore(ctx?.dbPath);
   await store.initialize();
 
   // Initialize event bus and register global subscriptions

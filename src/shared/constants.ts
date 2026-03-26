@@ -26,6 +26,6 @@ export const UPSERT_BATCH_SIZE = 100;
 export const SLACK_PAGE_SIZE = 200;
 
 // Orchestrator
-export const ORCHESTRATOR_BATCH_SIZE = 20;
-export const ORCHESTRATOR_MODEL = 'claude-haiku-4-5-20251001';
-export const ORCHESTRATOR_CONFIDENCE_THRESHOLD = 0.5;
+export const ORCHESTRATOR_BATCH_MAX_CHARS = 50_000;  // max total snippet chars per batch
+export const ORCHESTRATOR_BATCH_MAX_MESSAGES = 200;   // hard cap on messages per batch
+export const ORCHESTRATOR_TIMEOUT_MS = 120_000;

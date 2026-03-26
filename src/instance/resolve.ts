@@ -38,6 +38,24 @@ export function writeInstanceConfig(instancePath: string, config: InstanceConfig
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
 }
 
+const MAX_RECENT_ACTIVITIES = 5;
+
+/** Push a recent activity to an instance's config (FIFO, max 5). */
+export function pushRecentActivity(
+  instancePath: string,
+  activity: import('./types.js').RecentActivity,
+): void {
+  const config = readInstanceConfig(instancePath);
+  const recents = config.recentActivities ?? [];
+  recents.push(activity);
+  if (recents.length > MAX_RECENT_ACTIVITIES) {
+    recents.splice(0, recents.length - MAX_RECENT_ACTIVITIES);
+  }
+  config.recentActivities = recents;
+  config.updatedAt = new Date().toISOString();
+  writeInstanceConfig(instancePath, config);
+}
+
 /**
  * Resolve the Kuzu DB path for the current context:
  * 1. KUZU_DB_PATH env var (explicit override)
@@ -59,6 +77,10 @@ export function resolveInstanceDbPath(from?: string): string {
 
 /** Resolve instance path (not DB path) for current context */
 export function resolveInstancePath(from?: string): string {
+  // Explicit env var override — set by per-project .mcp.json
+  if (process.env.BRAINIFAI_INSTANCE_PATH) {
+    return process.env.BRAINIFAI_INSTANCE_PATH;
+  }
   const projectInstance = findProjectInstance(from);
   return projectInstance ?? GLOBAL_BRAINIFAI_PATH;
 }

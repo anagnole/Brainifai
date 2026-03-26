@@ -1,5 +1,79 @@
-import { Component, type ReactNode } from 'react';
+import { Component, type ReactNode, useSyncExternalStore } from 'react';
 import { GraphExplorer } from './components/GraphExplorer';
+import { Dashboard } from './components/Dashboard';
+import { IngestPage } from './components/IngestPage';
+
+/* ── Hash-based router ── */
+
+type Route = '/' | '/graph' | '/ingest';
+
+function getHash(): Route {
+  const raw = window.location.hash.replace(/^#/, '') || '/';
+  if (raw === '/graph' || raw === '/ingest') return raw;
+  return '/';
+}
+
+function subscribeHash(cb: () => void) {
+  window.addEventListener('hashchange', cb);
+  return () => window.removeEventListener('hashchange', cb);
+}
+
+function useRoute(): Route {
+  return useSyncExternalStore(subscribeHash, getHash, getHash);
+}
+
+function navigate(route: Route) {
+  window.location.hash = route;
+}
+
+/* ── Nav items ── */
+
+const NAV_ITEMS: Array<{ route: Route; label: string }> = [
+  { route: '/', label: 'Dashboard' },
+  { route: '/graph', label: 'Graph' },
+  { route: '/ingest', label: 'Ingest' },
+];
+
+/* ── Sidebar ── */
+
+function Sidebar({ current }: { current: Route }) {
+  return (
+    <nav className="nav-sidebar">
+      <div className="nav-brand">Brainifai</div>
+      <ul className="nav-links">
+        {NAV_ITEMS.map(({ route, label }) => (
+          <li key={route}>
+            <a
+              href={`#${route}`}
+              className={`nav-link ${current === route ? 'active' : ''}`}
+              onClick={(e) => {
+                e.preventDefault();
+                navigate(route);
+              }}
+            >
+              {label}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+
+/* ── Page renderer ── */
+
+function PageContent({ route }: { route: Route }) {
+  switch (route) {
+    case '/graph':
+      return <GraphExplorer />;
+    case '/ingest':
+      return <IngestPage />;
+    default:
+      return <Dashboard />;
+  }
+}
+
+/* ── Error boundary ── */
 
 class ErrorBoundary extends Component<
   { children: ReactNode },
@@ -32,10 +106,19 @@ class ErrorBoundary extends Component<
   }
 }
 
+/* ── App ── */
+
 export function App() {
+  const route = useRoute();
+
   return (
     <ErrorBoundary>
-      <GraphExplorer />
+      <div className="app-shell">
+        <Sidebar current={route} />
+        <main className={`app-main ${route === '/graph' ? 'app-main-graph' : ''}`}>
+          <PageContent route={route} />
+        </main>
+      </div>
     </ErrorBoundary>
   );
 }

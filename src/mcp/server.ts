@@ -80,6 +80,12 @@ export async function createServer(ctx?: McpInstanceContext | null): Promise<Mcp
   // Always register infrastructure tools (not context functions)
   registerUpdateDescription(server);
 
+  // Always register ingest_memory — it routes through the orchestrator, works for any instance
+  const ingestMemoryFn = registry.get('ingest_memory');
+  if (ingestMemoryFn && !activeFunctions.some((f) => f.name === 'ingest_memory')) {
+    registerContextFn(server, ingestMemoryFn);
+  }
+
   // If instance has a parent, register broader context tool for tree queries
   if (ctx?.parentName) {
     const broaderFn = registry.get('get_broader_context');

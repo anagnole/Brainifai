@@ -10,6 +10,10 @@ import { neighborhoodRoute } from './routes/neighborhood.js';
 import { timelineRoute } from './routes/timeline.js';
 import { entityRoute } from './routes/entity.js';
 import { overviewRoute } from './routes/overview.js';
+import { instancesRoute } from './routes/instances.js';
+import { orchestratorRoute } from './routes/orchestrator.js';
+import { ingestRoute } from './routes/ingest.js';
+import { graphInstanceRoute } from './routes/graph-instance.js';
 
 // Force on-demand mode so the viz server doesn't hold a persistent Kuzu lock.
 process.env.GRAPHSTORE_ON_DEMAND = 'true';
@@ -44,6 +48,10 @@ await app.register(neighborhoodRoute, { prefix: '/api' });
 await app.register(timelineRoute, { prefix: '/api' });
 await app.register(entityRoute, { prefix: '/api' });
 await app.register(overviewRoute, { prefix: '/api' });
+await app.register(instancesRoute, { prefix: '/api' });
+await app.register(orchestratorRoute, { prefix: '/api' });
+await app.register(ingestRoute, { prefix: '/api' });
+await app.register(graphInstanceRoute, { prefix: '/api' });
 
 // Initialize GraphStore
 const store = await getGraphStore();

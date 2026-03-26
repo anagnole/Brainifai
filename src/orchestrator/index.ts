@@ -1,116 +1,143 @@
-import { getGraphStore, closeGraphStore } from '../shared/graphstore.js';
-import { initEventBus, closeEventBus } from '../event-bus/index.js';
-import { listInstances } from '../instance/registry.js';
-import { collectIngestion } from '../ingestion/index.js';
-import { classifyBatch } from './classifier.js';
-import { buildRoutingPlan } from './router.js';
-import { deliverToInstance } from './delivery.js';
-import { upsertBatch } from '../ingestion/upsert.js';
+import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { logger } from '../shared/logger.js';
-import type { OrchestratorConfig, InstanceContext } from './types.js';
-import {
-  ORCHESTRATOR_BATCH_SIZE,
-  ORCHESTRATOR_MODEL,
-  ORCHESTRATOR_CONFIDENCE_THRESHOLD,
-} from '../shared/constants.js';
+import { spawnOrchestrator } from './spawn.js';
+import { upsertBatch } from '../ingestion/upsert.js';
+import { KuzuGraphStore } from '../graphstore/kuzu/adapter.js';
+import { GLOBAL_BRAINIFAI_PATH } from '../instance/resolve.js';
+import type { NormalizedMessage } from '../shared/types.js';
+import type { InstanceContext } from './types.js';
+import { ORCHESTRATOR_BATCH_MAX_CHARS, ORCHESTRATOR_BATCH_MAX_MESSAGES } from '../shared/constants.js';
+import { acquireLock, releaseLock } from './lock.js';
 
-async function main() {
-  process.env.GRAPHSTORE_READONLY = 'false';
-  const store = await getGraphStore();
-  await store.initialize();
-  await initEventBus();
+export type { InstanceContext } from './types.js';
 
-  const config: OrchestratorConfig = {
-    apiKey: process.env.ANTHROPIC_API_KEY!,
-    model: ORCHESTRATOR_MODEL,
-    batchSize: ORCHESTRATOR_BATCH_SIZE,
-    confidenceThreshold: ORCHESTRATOR_CONFIDENCE_THRESHOLD,
-  };
+const GLOBAL_DB_PATH = resolve(GLOBAL_BRAINIFAI_PATH, 'data', 'kuzu');
 
-  if (!config.apiKey) {
-    logger.error('ANTHROPIC_API_KEY required for orchestrator mode');
-    process.exit(1);
-  }
-
-  // 1. Get all active child instances from registry
-  const registryEntries = await listInstances({ status: 'active' });
-  const children: InstanceContext[] = registryEntries
-    .filter(e => e.name !== 'global')
-    .map(e => ({ name: e.name, type: e.type, description: e.description }));
-
-  if (children.length === 0) {
-    logger.info('No child instances registered — running standard ingestion (all to global)');
-  }
-
-  // 2. Collect all ingested data (no upsert yet)
-  const allMessages = await collectIngestion(store);
-  logger.info({ count: allMessages.length }, 'Collected messages from all sources');
-
-  if (allMessages.length === 0) {
-    logger.info('No new data to process');
-    await closeEventBus();
-    await closeGraphStore();
-    return;
-  }
-
-  // 3. Classify in batches and route
-  let totalGlobal = 0;
-  const deliveryCounts = new Map<string, number>();
-
-  for (let i = 0; i < allMessages.length; i += config.batchSize) {
-    const batch = allMessages.slice(i, i + config.batchSize);
-
-    let classification;
-    if (children.length === 0) {
-      // No children — skip AI, everything goes to global
-      classification = {
-        results: batch.map(msg => ({
-          message: msg,
-          decision: { targets: [] as string[], confidence: 1, reason: 'No children registered' },
-        })),
-        errors: [] as Array<{ message: typeof batch[0]; error: string }>,
-      };
-    } else {
-      classification = await classifyBatch(batch, children, config);
-    }
-
-    // 4. Build routing plan (handles fanout)
-    const plan = buildRoutingPlan(classification);
-
-    // 5. Deliver to children via event bus
-    for (const [target, messages] of plan.targeted) {
-      await deliverToInstance(target, messages);
-      deliveryCounts.set(target, (deliveryCounts.get(target) ?? 0) + messages.length);
-    }
-
-    // 6. Upsert global fallback directly
-    if (plan.global.length > 0) {
-      await upsertBatch(store, plan.global);
-      totalGlobal += plan.global.length;
-    }
-
-    logger.info({
-      batchIndex: Math.floor(i / config.batchSize),
-      targeted: plan.targeted.size,
-      global: plan.global.length,
-    }, 'Processed batch');
-  }
-
-  // Summary
-  console.log(`Orchestrator complete: ${allMessages.length} messages processed`);
-  console.log(`  Global: ${totalGlobal}`);
-  for (const [target, count] of deliveryCounts) {
-    console.log(`  → ${target}: ${count}`);
-  }
-
-  await closeEventBus();
-  await closeGraphStore();
+export interface OrchestratorResult {
+  source: string;
+  totalMessages: number;
+  routedToChildren: number;
+  routedToGlobal: number;
+  fallbackToGlobal: number;
+  errors: string[];
 }
 
-main().catch(async (err) => {
-  logger.error(err, 'Orchestrator failed');
-  console.error('Orchestrator failed:', err.message);
-  await closeEventBus();
-  await closeGraphStore();
-  process.exit(1);
-});
+/** Open a short-lived writable connection to the global DB, upsert, close. */
+async function upsertToGlobal(messages: NormalizedMessage[]): Promise<void> {
+  const store = new KuzuGraphStore({ dbPath: GLOBAL_DB_PATH, readOnly: false });
+  try {
+    await store.initialize();
+    await upsertBatch(store, messages);
+  } finally {
+    await store.close();
+  }
+}
+
+/**
+ * Route a batch of normalized messages from a single source to child instances
+ * via a Claude CLI subprocess. Global messages are written by this process.
+ * Falls back to global upsert on failure.
+ */
+export async function orchestrateSource(
+  sourceName: string,
+  messages: NormalizedMessage[],
+  children: InstanceContext[],
+): Promise<OrchestratorResult> {
+  if (!acquireLock(sourceName)) {
+    logger.warn({ source: sourceName }, 'Orchestrator lock held — falling back to global');
+    await upsertToGlobal(messages);
+    return {
+      source: sourceName,
+      totalMessages: messages.length,
+      routedToChildren: 0,
+      routedToGlobal: 0,
+      fallbackToGlobal: messages.length,
+      errors: ['Orchestrator lock held by another process'],
+    };
+  }
+
+  const result: OrchestratorResult = {
+    source: sourceName,
+    totalMessages: messages.length,
+    routedToChildren: 0,
+    routedToGlobal: 0,
+    fallbackToGlobal: 0,
+    errors: [],
+  };
+
+  // Chunk into sub-batches by total content size
+  const batches: NormalizedMessage[][] = [];
+  let currentBatch: NormalizedMessage[] = [];
+  let currentChars = 0;
+
+  for (const msg of messages) {
+    const msgChars = msg.activity.snippet.length;
+    if (currentBatch.length > 0 &&
+        (currentChars + msgChars > ORCHESTRATOR_BATCH_MAX_CHARS ||
+         currentBatch.length >= ORCHESTRATOR_BATCH_MAX_MESSAGES)) {
+      batches.push(currentBatch);
+      currentBatch = [];
+      currentChars = 0;
+    }
+    currentBatch.push(msg);
+    currentChars += msgChars;
+  }
+  if (currentBatch.length > 0) batches.push(currentBatch);
+
+  for (const batch of batches) {
+    // Write batch to temp file
+    const tmpDir = mkdtempSync(join(tmpdir(), 'brainifai-batch-'));
+    const batchFile = join(tmpDir, 'batch.json');
+    writeFileSync(batchFile, JSON.stringify(batch, null, 2));
+
+    try {
+      const spawnResult = await spawnOrchestrator(sourceName, batchFile, batch.length, children);
+
+      if (spawnResult.success) {
+        // Write global messages via short-lived writable connection
+        if (spawnResult.globalIndices.length > 0) {
+          const globalMessages = spawnResult.globalIndices
+            .filter(i => i >= 0 && i < batch.length)
+            .map(i => batch[i]);
+
+          if (globalMessages.length > 0) {
+            await upsertToGlobal(globalMessages);
+            result.routedToGlobal += globalMessages.length;
+          }
+        }
+
+        result.routedToChildren += batch.length - spawnResult.globalIndices.length;
+      } else {
+        // Fallback: upsert entire batch to global
+        logger.warn(
+          { source: sourceName, error: spawnResult.error, batchSize: batch.length },
+          'Orchestrator failed — falling back to global upsert',
+        );
+        result.errors.push(spawnResult.error ?? 'Unknown error');
+
+        await upsertToGlobal(batch);
+        result.fallbackToGlobal += batch.length;
+      }
+    } finally {
+      try { unlinkSync(batchFile); } catch { /* ignore */ }
+      try { rmSync(tmpDir, { recursive: true }); } catch { /* ignore */ }
+    }
+  }
+
+  releaseLock();
+
+  logger.info(
+    {
+      source: sourceName,
+      total: result.totalMessages,
+      children: result.routedToChildren,
+      global: result.routedToGlobal,
+      fallback: result.fallbackToGlobal,
+    },
+    'Orchestration complete',
+  );
+
+  return result;
+}

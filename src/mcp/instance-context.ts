@@ -1,5 +1,6 @@
 // ─── Resolve instance context for MCP server ────────────────────────────────
 
+import { resolve } from 'path';
 import { resolveInstancePath, readInstanceConfig, globalInstanceExists, GLOBAL_BRAINIFAI_PATH } from '../instance/resolve.js';
 import { resolveContextFunctions } from '../context/resolve.js';
 import { logger } from '../shared/logger.js';
@@ -41,7 +42,7 @@ export function resolveMcpContext(): McpInstanceContext | null {
       instanceName: config.name,
       instanceType: config.type,
       description: config.description,
-      dbPath: instancePath,
+      dbPath: resolve(instancePath, 'data', 'kuzu'),
       activeFunctions,
       parentName: config.parent,
     };
