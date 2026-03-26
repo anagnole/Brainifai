@@ -448,7 +448,7 @@ async function collectGitHub(store: GraphStore): Promise<NormalizedMessage[]> {
 async function collectClickUp(store: GraphStore): Promise<NormalizedMessage[]> {
   const config = getClickUpConfig();
   const client = getClickUpClient(config.token);
-  const { workspaceId } = await verifyClickUpAuth(client);
+  const { workspaceId, workspaceName } = await verifyClickUpAuth(client);
 
   const backfillSince = new Date(Date.now() - config.backfillDays * 86400 * 1000).toISOString();
   const collected: NormalizedMessage[] = [];
@@ -505,7 +505,7 @@ async function collectClickUp(store: GraphStore): Promise<NormalizedMessage[]> {
         const docTs = new Date(Number(doc.date_updated)).toISOString();
         if (docTs <= docSince) continue;
 
-        const item = normalizeClickUpDoc(doc, workspaceId, config.topicAllowlist);
+        const item = normalizeClickUpDoc(doc, workspaceId, workspaceName, config.topicAllowlist);
         if (item) {
           collected.push(item);
           if (docTs > latestDocTs) latestDocTs = docTs;
