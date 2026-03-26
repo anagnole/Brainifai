@@ -10,7 +10,7 @@ export interface InstanceTemplate {
 export const TEMPLATES: Record<string, InstanceTemplate> = {
   coding: {
     type: 'coding',
-    description: 'Code-focused instance — GitHub PRs, Claude Code sessions, code review context',
+    description: 'Code-focused instance — bridges GitNexus code intelligence (symbols, blast radius, execution flows) with Brainifai knowledge (decisions, sessions, PR activity)',
     sources: [
       { source: 'github', enabled: true },
       { source: 'claude-code', enabled: true },
@@ -18,7 +18,8 @@ export const TEMPLATES: Record<string, InstanceTemplate> = {
     contextFunctions: [
       'get_context_packet', 'search_entities', 'get_entity_summary',
       'get_recent_activity',
-      'get_pr_summary', 'get_decision_log',
+      'search_code', 'get_symbol_context', 'get_blast_radius', 'detect_code_changes',
+      'get_decision_log', 'get_pr_context',
     ],
   },
   manager: {
