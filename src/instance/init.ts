@@ -5,6 +5,7 @@ import { getTemplate, TEMPLATES } from './templates.js';
 import { generateDescription } from './descriptions.js';
 import { initializeInstanceDb } from './db.js';
 import { registerWithGlobal } from './registry.js';
+import { generateInstanceSkill } from './skill-generator.js';
 import type { InstanceConfig } from './types.js';
 
 export interface InitGlobalOptions {
@@ -103,6 +104,16 @@ export async function initProjectInstance(opts: InitProjectOptions): Promise<str
 
   // Ensure .brainifai/ is in the project's .gitignore
   ensureGitignore(opts.projectPath);
+
+  // Generate .claude/skills/brainifai/SKILL.md so Claude Code sessions get
+  // instant access to query commands without any extra setup
+  generateInstanceSkill({
+    instancePath,
+    projectPath: opts.projectPath,
+    name: opts.name,
+    type: opts.type,
+    description,
+  });
 
   return instancePath;
 }
