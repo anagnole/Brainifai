@@ -4,7 +4,6 @@ import { KuzuGraphStore } from '../graphstore/kuzu/adapter.js';
 import { createEhrSchema } from '../graphstore/kuzu/ehr-schema.js';
 import { createProjectManagerSchema } from '../graphstore/kuzu/project-manager-schema.js';
 
-/** Initialize a fresh Kuzu DB with the standard schema at the given path */
 export async function initializeInstanceDb(dbPath: string, type?: string): Promise<void> {
   if (type === 'ehr') {
     return initializeEhrDb(dbPath);
@@ -17,7 +16,6 @@ export async function initializeInstanceDb(dbPath: string, type?: string): Promi
   await store.close();
 }
 
-/** Initialize an EHR-specific Kuzu DB (separate schema, no base tables) */
 async function initializeEhrDb(dbPath: string): Promise<void> {
   // Ensure parent directory exists, but let Kuzu create its own DB directory
   const parentDir = dbPath.replace(/[/\\][^/\\]+$/, '');
@@ -34,7 +32,6 @@ async function initializeEhrDb(dbPath: string): Promise<void> {
   await db.close();
 }
 
-/** Initialize a project-manager Kuzu DB (separate schema, no base tables) */
 async function initializeProjectManagerDb(dbPath: string): Promise<void> {
   const parentDir = dbPath.replace(/[/\\][^/\\]+$/, '');
   if (parentDir && !existsSync(parentDir)) {

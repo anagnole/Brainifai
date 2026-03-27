@@ -59,7 +59,7 @@ export function pushRecentActivity(
 /**
  * Resolve the Kuzu DB path for the current context:
  * 1. KUZU_DB_PATH env var (explicit override)
- * 2. Nearest project .brainifai/data/kuzu (walk up from cwd)
+ * 2. Nearest project .brainifai/data/kuzu (walk up from cwd or CLAUDE_PROJECT_DIR)
  * 3. Global ~/.brainifai/data/kuzu (fallback)
  */
 export function resolveInstanceDbPath(from?: string): string {
@@ -72,6 +72,14 @@ export function resolveInstanceDbPath(from?: string): string {
     return resolve(projectInstance, 'data', 'kuzu');
   }
 
+  // Also try CLAUDE_PROJECT_DIR (set by Claude Code for MCP servers)
+  if (!from && process.env.CLAUDE_PROJECT_DIR) {
+    const fromClaudeDir = findProjectInstance(process.env.CLAUDE_PROJECT_DIR);
+    if (fromClaudeDir) {
+      return resolve(fromClaudeDir, 'data', 'kuzu');
+    }
+  }
+
   return resolve(GLOBAL_BRAINIFAI_PATH, 'data', 'kuzu');
 }
 
@@ -82,5 +90,13 @@ export function resolveInstancePath(from?: string): string {
     return process.env.BRAINIFAI_INSTANCE_PATH;
   }
   const projectInstance = findProjectInstance(from);
-  return projectInstance ?? GLOBAL_BRAINIFAI_PATH;
+  if (projectInstance) return projectInstance;
+
+  // Also try CLAUDE_PROJECT_DIR (set by Claude Code for MCP servers)
+  if (!from && process.env.CLAUDE_PROJECT_DIR) {
+    const fromClaudeDir = findProjectInstance(process.env.CLAUDE_PROJECT_DIR);
+    if (fromClaudeDir) return fromClaudeDir;
+  }
+
+  return GLOBAL_BRAINIFAI_PATH;
 }

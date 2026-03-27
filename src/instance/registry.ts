@@ -103,8 +103,8 @@ export async function registerWithGlobal(
     `);
     await conn.execute(edgePs, { parent: 'global', child: name });
   } finally {
-    conn.close();
-    db.close();
+    await conn.close();
+    await db.close();
   }
 
   await emitInstanceRegistered(name, { name, type, description, path: instancePath, parent: 'global' });
@@ -126,8 +126,8 @@ export async function unregisterInstance(name: string): Promise<boolean> {
   } catch {
     return false;
   } finally {
-    conn.close();
-    db.close();
+    await conn.close();
+    await db.close();
   }
 }
 
@@ -143,8 +143,8 @@ export async function syncDescription(name: string, description: string): Promis
     `);
     await conn.execute(ps, { name, description, updated_at: new Date().toISOString() });
   } finally {
-    conn.close();
-    db.close();
+    await conn.close();
+    await db.close();
   }
 
   await emitInstanceUpdated(name, { name, fields: { description } });
@@ -168,8 +168,8 @@ export async function listInstances(opts?: { status?: string }): Promise<Instanc
   } catch {
     return []; // table doesn't exist yet or read error
   } finally {
-    conn.close();
-    db.close();
+    await conn.close();
+    await db.close();
   }
 }
 
@@ -187,8 +187,8 @@ export async function getInstanceByName(name: string): Promise<InstanceRegistryE
   } catch {
     return null;
   } finally {
-    conn.close();
-    db.close();
+    await conn.close();
+    await db.close();
   }
 }
 
@@ -228,7 +228,7 @@ export async function searchInstances(query: string): Promise<InstanceRegistryEn
     // FTS index may not exist yet (no data) — fall back to empty
     return [];
   } finally {
-    conn.close();
-    db.close();
+    await conn.close();
+    await db.close();
   }
 }

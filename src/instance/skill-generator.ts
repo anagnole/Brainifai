@@ -53,41 +53,10 @@ function buildSkillContent(p: SkillParams): string {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Inline tsx one-liner for project-manager queries */
-function pmScript(dbPath: string, brainifaiRoot: string, body: string): string {
-  const tsx = resolve(brainifaiRoot, 'node_modules/.bin/tsx');
-  // Escape backticks inside body just in case
-  const safeBody = body.replace(/`/g, '\\`');
-  return [
-    '```bash',
-    `${tsx} --tsconfig ${resolve(brainifaiRoot, 'tsconfig.json')} -e "`,
-    `import { ProjectManagerGraphStore } from '${resolve(brainifaiRoot, 'src/graphstore/kuzu/project-manager-adapter.js')}';`,
-    `const store = new ProjectManagerGraphStore({ dbPath: '${dbPath}', readOnly: true });`,
-    safeBody,
-    `await store.close();`,
-    '"',
-    '```',
-  ].join('\n');
-}
-
 // ─── project-manager ──────────────────────────────────────────────────────────
 
 function buildProjectManagerSkill(p: SkillParams): string {
-  const { name, description, dbPath, brainifaiRoot } = p;
-  const tsx = resolve(brainifaiRoot, 'node_modules/.bin/tsx');
-  const adapter = resolve(brainifaiRoot, 'src/graphstore/kuzu/project-manager-adapter.js');
-  const tsconfig = resolve(brainifaiRoot, 'tsconfig.json');
-
-  const script = (body: string) => [
-    '```bash',
-    `${tsx} --tsconfig ${tsconfig} -e "`,
-    `import { ProjectManagerGraphStore } from '${adapter}';`,
-    `const s = new ProjectManagerGraphStore({ dbPath: '${dbPath}', readOnly: true });`,
-    body,
-    `await s.close();`,
-    '"',
-    '```',
-  ].join('\n');
+  const { name, description } = p;
 
   return `---
 name: brainifai
@@ -100,85 +69,42 @@ This directory has a Brainifai **project-manager** instance named **"${name}"**.
 
 > ${description}
 
-**DB:** \`${dbPath}\`
+## Available MCP Tools
 
-Use the bash scripts below to query project data directly. Results are JSON — pipe through \`| python3 -m json.tool\` or \`| jq\` for readable output.
+Use these Brainifai MCP tools to query the project knowledge graph. They are available in every Claude Code session.
 
----
+| Tool | What it does | Example |
+|------|-------------|---------|
+| \`search_projects\` | Full-text search across projects by name, description, or framework | \`search_projects({ query: "react" })\` |
+| \`get_project_health\` | Health score, staleness, dependency freshness, commit/branch counts | \`get_project_health({ project_slug: "brainifai" })\` |
+| \`get_project_activity\` | Recent commits, Claude sessions, and tasks for a project | \`get_project_activity({ project_slug: "alfred", window_days: 14 })\` |
+| \`find_stale_projects\` | Find repos with no activity above a threshold | \`find_stale_projects({ days_threshold: 30 })\` |
+| \`get_dependency_graph\` | Shared dependencies across projects, version mismatch detection | \`get_dependency_graph()\` or \`get_dependency_graph({ project_slug: "aballos" })\` |
+| \`get_cross_project_impact\` | Multi-hop graph traversal — what's affected if a project changes | \`get_cross_project_impact({ project_slug: "claude-api", depth: 2 })\` |
+| \`get_claude_session_history\` | Audit trail of Claude Code sessions for a project | \`get_claude_session_history({ project_slug: "brainifai" })\` |
 
-## Search projects
+## Workflow
 
-Find projects by name, language, or keyword:
+### Getting oriented
+1. \`search_projects({ query: "" })\` — list all tracked projects
+2. \`find_stale_projects({ days_threshold: 30 })\` — see what needs attention
 
-${script(`const results = await s.searchProjects(process.argv[2] ?? '');
-console.log(JSON.stringify(results, null, 2));`)}
+### Before working on a project
+1. \`get_project_health({ project_slug: "..." })\` — health overview
+2. \`get_project_activity({ project_slug: "...", window_days: 7 })\` — recent changes
+3. \`get_cross_project_impact({ project_slug: "..." })\` — what depends on this
 
-**Usage:** append a search term as the last argument, e.g. \`... "react"\`
+### Understanding the ecosystem
+1. \`get_dependency_graph()\` — full cross-project dependency map
+2. \`get_claude_session_history({ project_slug: "..." })\` — what Claude worked on
 
----
+## Re-indexing
 
-## Project health
+To refresh the project data, run from any terminal:
 
-Full health report for one project (commits, branches, deps, stale count):
-
-${script(`const slug = process.argv[2] ?? '';
-if (!slug) { console.error('Usage: ... <project-slug>'); process.exit(1); }
-const report = await s.getProjectHealth(slug);
-console.log(JSON.stringify(report, null, 2));`)}
-
----
-
-## Recent activity
-
-Commits, Claude sessions, and tasks for a project over the last N days:
-
-${script(`const [slug, days, limit] = [process.argv[2], Number(process.argv[3] ?? 30), Number(process.argv[4] ?? 20)];
-if (!slug) { console.error('Usage: ... <slug> [days] [limit]'); process.exit(1); }
-const activity = await s.getProjectActivity(slug, days, limit);
-console.log(JSON.stringify(activity, null, 2));`)}
-
----
-
-## Stale projects
-
-Find repos with no commit activity in the last N days (default 30):
-
-${script(`const days = Number(process.argv[2] ?? 30);
-const stale = await s.findStaleProjects(days);
-console.log(JSON.stringify(stale, null, 2));`)}
-
----
-
-## Cross-project impact
-
-Which projects depend on (or are depended on by) a given project:
-
-${script(`const slug = process.argv[2] ?? '';
-const depth = Number(process.argv[3] ?? 2);
-if (!slug) { console.error('Usage: ... <slug> [depth]'); process.exit(1); }
-const impact = await s.getCrossProjectImpact(slug, depth);
-console.log(JSON.stringify(impact, null, 2));`)}
-
----
-
-## Dependency graph
-
-Full dependency graph with version mismatch detection:
-
-${script(`const filter = process.argv[2]; // optional project slug filter
-const graph = await s.getDependencyGraph(filter);
-console.log(JSON.stringify(graph, null, 2));`)}
-
----
-
-## Claude session history
-
-Recent Claude Code sessions for a project:
-
-${script(`const [slug, days, limit] = [process.argv[2], Number(process.argv[3] ?? 90), Number(process.argv[4] ?? 20)];
-if (!slug) { console.error('Usage: ... <slug> [days] [limit]'); process.exit(1); }
-const sessions = await s.getClaudeSessionHistory(slug, days, limit);
-console.log(JSON.stringify(sessions, null, 2));`)}
+\`\`\`bash
+cd ~/Projects && brainifai init --type project-manager --name ${name} --force
+\`\`\`
 `;
 }
 

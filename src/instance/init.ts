@@ -1,4 +1,4 @@
-import { mkdirSync, existsSync, readFileSync, appendFileSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync, appendFileSync, rmSync } from 'fs';
 import { resolve } from 'path';
 import { GLOBAL_BRAINIFAI_PATH, writeInstanceConfig, INSTANCE_CONFIG_FILE } from './resolve.js';
 import { getTemplate, TEMPLATES } from './templates.js';
@@ -17,6 +17,7 @@ export interface InitProjectOptions {
   type: string;
   description?: string;  // auto-generated if omitted
   projectPath: string;   // absolute path to the project root
+  force?: boolean;       // delete and re-create if instance already exists
 }
 
 /** Create the global instance at ~/.brainifai/ */
@@ -62,7 +63,11 @@ export async function initProjectInstance(opts: InitProjectOptions): Promise<str
   const instancePath = resolve(opts.projectPath, '.brainifai');
 
   if (existsSync(resolve(instancePath, INSTANCE_CONFIG_FILE))) {
-    throw new Error('Instance already exists at ' + instancePath);
+    if (opts.force) {
+      rmSync(instancePath, { recursive: true });
+    } else {
+      throw new Error('Instance already exists at ' + instancePath);
+    }
   }
 
   // Global must exist first
@@ -96,8 +101,12 @@ export async function initProjectInstance(opts: InitProjectOptions): Promise<str
   // Write config
   writeInstanceConfig(instancePath, config);
 
-  // Initialize DB schema
-  await initializeInstanceDb(dbPath, opts.type);
+  // Initialize DB schema — skip for project-manager: its ingestion pipeline opens
+  // the DB and calls initialize() itself (IF NOT EXISTS DDL). Opening the DB twice
+  // in the same process causes a native Kuzu segfault.
+  if (opts.type !== 'project-manager') {
+    await initializeInstanceDb(dbPath, opts.type);
+  }
 
   // Register with global instance
   await registerWithGlobal(opts.name, opts.type, description, instancePath, now);
