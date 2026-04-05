@@ -25,6 +25,13 @@ import { getClaudeCodeConfig } from './claude-code/config.js';
 import { discoverProjects, listSessionFiles, parseSessionFile } from './claude-code/client.js';
 import { summarizeSession, fallbackSummary } from './claude-code/summarize.js';
 import { normalizeSession } from './claude-code/normalize.js';
+import { getTwitterConfig } from './twitter/config.js';
+import { getTwitterClient, verifyAuth as verifyTwitterAuth, fetchUserTweets, fetchSearchResults } from './twitter/client.js';
+import { normalizeTweet } from './twitter/normalize.js';
+import { extractAndUpsertResearcherData } from './researcher/index.js';
+import { ResearcherGraphStore } from '../graphstore/kuzu/researcher-adapter.js';
+import { findInstancesByType } from '../instance/registry.js';
+import { readInstanceConfig } from '../instance/resolve.js';
 
 async function ingestSlack(store: GraphStore) {
   const config = getSlackConfig();
@@ -352,6 +359,90 @@ async function ingestClaudeCode(store: GraphStore) {
   console.log(`Claude Code: ingested ${totalIngested} sessions from ${projectDirs.length} projects`);
 }
 
+async function ingestTwitter(store: GraphStore) {
+  const config = getTwitterConfig();
+  const client = getTwitterClient(config.cookies);
+
+  await verifyTwitterAuth(client);
+
+  const backfillSince = new Date(
+    Date.now() - config.backfillDays * 86400 * 1000,
+  );
+
+  // --- User timelines ---
+  for (const username of config.usernames) {
+    logger.info({ username }, 'Processing Twitter user timeline');
+
+    const cursorKey = `${username}:timeline`;
+    const cursorVal = await getCursor(store, 'twitter', cursorKey);
+    const since = cursorVal ? new Date(cursorVal) : backfillSince;
+
+    let totalIngested = 0;
+    let latestTs = cursorVal ?? backfillSince.toISOString();
+
+    for await (const page of fetchUserTweets(client, username, since)) {
+      const normalized: NormalizedMessage[] = [];
+
+      for (const tweet of page) {
+        const result = normalizeTweet(tweet, username, 'user_timeline', config.topicAllowlist);
+        if (result) {
+          normalized.push(result);
+          if (tweet.created_at > latestTs) latestTs = tweet.created_at;
+        }
+      }
+
+      for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
+        await upsertBatch(store, normalized.slice(i, i + UPSERT_BATCH_SIZE));
+      }
+
+      totalIngested += normalized.length;
+    }
+
+    if (latestTs !== (cursorVal ?? backfillSince.toISOString())) {
+      await setCursor(store, 'twitter', cursorKey, latestTs);
+    }
+
+    console.log(`Twitter @${username}: ingested ${totalIngested} tweets`);
+  }
+
+  // --- Search queries ---
+  for (const query of config.searchQueries) {
+    const safeKey = query.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+    logger.info({ query }, 'Processing Twitter search');
+
+    const cursorKey = `search:${safeKey}`;
+    const cursorVal = await getCursor(store, 'twitter', cursorKey);
+    const since = cursorVal ? new Date(cursorVal) : backfillSince;
+
+    let totalIngested = 0;
+    let latestTs = cursorVal ?? backfillSince.toISOString();
+
+    for await (const page of fetchSearchResults(client, query, since)) {
+      const normalized: NormalizedMessage[] = [];
+
+      for (const tweet of page) {
+        const result = normalizeTweet(tweet, safeKey, 'search', config.topicAllowlist);
+        if (result) {
+          normalized.push(result);
+          if (tweet.created_at > latestTs) latestTs = tweet.created_at;
+        }
+      }
+
+      for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
+        await upsertBatch(store, normalized.slice(i, i + UPSERT_BATCH_SIZE));
+      }
+
+      totalIngested += normalized.length;
+    }
+
+    if (latestTs !== (cursorVal ?? backfillSince.toISOString())) {
+      await setCursor(store, 'twitter', cursorKey, latestTs);
+    }
+
+    console.log(`Twitter search "${query}": ingested ${totalIngested} tweets`);
+  }
+}
+
 // ─── Collect-only variants (for orchestrator mode) ────────────────────────
 // These mirror the ingest* functions but return NormalizedMessages instead of upserting.
 
@@ -595,6 +686,62 @@ async function collectClaudeCode(store: GraphStore): Promise<NormalizedMessage[]
   return collected;
 }
 
+async function collectTwitter(store: GraphStore): Promise<NormalizedMessage[]> {
+  const config = getTwitterConfig();
+  const client = getTwitterClient(config.cookies);
+  await verifyTwitterAuth(client);
+
+  const backfillSince = new Date(
+    Date.now() - config.backfillDays * 86400 * 1000,
+  );
+  const collected: NormalizedMessage[] = [];
+
+  for (const username of config.usernames) {
+    const cursorKey = `${username}:timeline`;
+    const cursorVal = await getCursor(store, 'twitter', cursorKey);
+    const since = cursorVal ? new Date(cursorVal) : backfillSince;
+    let latestTs = cursorVal ?? backfillSince.toISOString();
+
+    for await (const page of fetchUserTweets(client, username, since)) {
+      for (const tweet of page) {
+        const result = normalizeTweet(tweet, username, 'user_timeline', config.topicAllowlist);
+        if (result) {
+          collected.push(result);
+          if (tweet.created_at > latestTs) latestTs = tweet.created_at;
+        }
+      }
+    }
+
+    if (latestTs !== (cursorVal ?? backfillSince.toISOString())) {
+      await setCursor(store, 'twitter', cursorKey, latestTs);
+    }
+  }
+
+  for (const query of config.searchQueries) {
+    const safeKey = query.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+    const cursorKey = `search:${safeKey}`;
+    const cursorVal = await getCursor(store, 'twitter', cursorKey);
+    const since = cursorVal ? new Date(cursorVal) : backfillSince;
+    let latestTs = cursorVal ?? backfillSince.toISOString();
+
+    for await (const page of fetchSearchResults(client, query, since)) {
+      for (const tweet of page) {
+        const result = normalizeTweet(tweet, safeKey, 'search', config.topicAllowlist);
+        if (result) {
+          collected.push(result);
+          if (tweet.created_at > latestTs) latestTs = tweet.created_at;
+        }
+      }
+    }
+
+    if (latestTs !== (cursorVal ?? backfillSince.toISOString())) {
+      await setCursor(store, 'twitter', cursorKey, latestTs);
+    }
+  }
+
+  return collected;
+}
+
 /** Ingest from all sources and return normalized messages (no upsert). */
 export async function collectIngestion(store: GraphStore): Promise<NormalizedMessage[]> {
   const sources: Array<{ name: string; fn: () => Promise<NormalizedMessage[]> }> = [];
@@ -611,11 +758,16 @@ export async function collectIngestion(store: GraphStore): Promise<NormalizedMes
   if (process.env.APPLE_CALDAV_USERNAME) {
     sources.push({ name: 'Apple Calendar', fn: () => collectAppleCalendar(store) });
   }
+  if (process.env.TWITTER_COOKIES) {
+    sources.push({ name: 'Twitter', fn: () => collectTwitter(store) });
+  }
 
   const ccProjectsPath = process.env.CLAUDE_CODE_PROJECTS_PATH
     ?? `${process.env.HOME}/.claude/projects`;
-  if (existsSync(ccProjectsPath)) {
+  if (existsSync(ccProjectsPath) && process.env.ANTHROPIC_API_KEY) {
     sources.push({ name: 'Claude Code', fn: () => collectClaudeCode(store) });
+  } else if (existsSync(ccProjectsPath)) {
+    logger.info('Skipping Claude Code ingestion — ANTHROPIC_API_KEY not set (summaries would be low quality)');
   }
 
   const results = await Promise.allSettled(sources.map(s => s.fn()));
@@ -665,6 +817,74 @@ async function writeStatusFile(store: GraphStore, status: 'success' | 'error') {
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, JSON.stringify(payload, null, 2));
   logger.info({ path: filePath }, 'Wrote status.json');
+}
+
+/**
+ * Post-ingestion researcher extraction: find all researcher instances,
+ * open their graph stores, and run LLM extraction on recently ingested activities.
+ */
+async function runResearcherExtraction(ingestedActivities: NormalizedMessage[]): Promise<void> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    logger.info('ANTHROPIC_API_KEY not set — skipping researcher extraction');
+    return;
+  }
+  if (ingestedActivities.length === 0) {
+    logger.info('No activities to extract — skipping researcher extraction');
+    return;
+  }
+
+  let researcherInstances: Array<{ name: string; path: string; domain: string }> = [];
+  try {
+    const entries = await findInstancesByType('researcher');
+    researcherInstances = entries
+      .filter(e => e.status === 'active')
+      .map(e => {
+        const config = readInstanceConfig(e.path);
+        return { name: e.name, path: e.path, domain: config.domain ?? 'general' };
+      });
+  } catch {
+    logger.info('No researcher instances found — skipping extraction');
+    return;
+  }
+
+  if (researcherInstances.length === 0) {
+    logger.info('No active researcher instances — skipping extraction');
+    return;
+  }
+
+  for (const instance of researcherInstances) {
+    const dbPath = resolve(instance.path, 'data', 'kuzu');
+    let researcherStore: ResearcherGraphStore | undefined;
+
+    try {
+      researcherStore = new ResearcherGraphStore({ dbPath, readOnly: false });
+      await researcherStore.initialize();
+
+      logger.info(
+        { instance: instance.name, domain: instance.domain, activities: ingestedActivities.length },
+        'Running researcher extraction',
+      );
+
+      const counts = await extractAndUpsertResearcherData(
+        ingestedActivities,
+        instance.domain,
+        researcherStore,
+        apiKey,
+      );
+
+      console.log(
+        `Researcher "${instance.name}" (${instance.domain}): extracted ${counts.entitiesCount} entities, ${counts.eventsCount} events, ${counts.trendsCount} trends`,
+      );
+    } catch (err) {
+      logger.error({ err, instance: instance.name }, 'Researcher extraction failed');
+      console.error(`Researcher "${instance.name}": extraction FAILED — ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      if (researcherStore) {
+        try { await researcherStore.close(); } catch { /* ignore */ }
+      }
+    }
+  }
 }
 
 async function main() {
@@ -727,6 +947,12 @@ async function main() {
     logger.info('APPLE_CALDAV_USERNAME not set — skipping Apple Calendar ingestion');
   }
 
+  if (process.env.TWITTER_COOKIES) {
+    sources.push({ name: 'Twitter', ingestFn: () => ingestTwitter(store), collectFn: () => collectTwitter(store) });
+  } else {
+    logger.info('TWITTER_COOKIES not set — skipping Twitter ingestion');
+  }
+
   const ccProjectsPath = process.env.CLAUDE_CODE_PROJECTS_PATH
     ?? `${process.env.HOME}/.claude/projects`;
   if (existsSync(ccProjectsPath)) {
@@ -734,6 +960,9 @@ async function main() {
   } else {
     logger.info('Claude Code projects path not found — skipping');
   }
+
+  // Track all ingested activities for post-ingestion researcher extraction
+  const allIngestedActivities: NormalizedMessage[] = [];
 
   if (children.length > 0) {
     // Orchestrated mode: collect from each source, then route via Claude CLI
@@ -744,6 +973,7 @@ async function main() {
       try {
         const messages = await source.collectFn();
         if (messages.length > 0) {
+          allIngestedActivities.push(...messages);
           const result = await orchestrateSource(source.name, messages, children);
           console.log(`${source.name}: ${result.routedToChildren} to children, ${result.routedToGlobal} to global, ${result.fallbackToGlobal} fallback`);
           if (result.errors.length > 0) {
@@ -758,12 +988,20 @@ async function main() {
       }
     }
   } else {
-    // Direct mode: ingest straight to global (no children to route to)
-    const results = await Promise.allSettled(sources.map((s) => s.ingestFn()));
+    // Direct mode: collect then ingest to global (no children to route to)
+    // Collect first so we have activities available for researcher extraction
+    const collectResults = await Promise.allSettled(sources.map((s) => s.collectFn()));
 
     for (let i = 0; i < sources.length; i++) {
-      const result = results[i];
-      if (result.status === 'rejected') {
+      const result = collectResults[i];
+      if (result.status === 'fulfilled' && result.value.length > 0) {
+        allIngestedActivities.push(...result.value);
+        // Upsert collected messages to global store
+        for (let j = 0; j < result.value.length; j += UPSERT_BATCH_SIZE) {
+          await upsertBatch(store, result.value.slice(j, j + UPSERT_BATCH_SIZE));
+        }
+        console.log(`${sources[i].name}: ingested ${result.value.length} items`);
+      } else if (result.status === 'rejected') {
         logger.error({ source: sources[i].name, err: result.reason }, 'Source ingestion failed');
         console.error(`${sources[i].name}: FAILED — ${result.reason?.message ?? result.reason}`);
       }
@@ -777,18 +1015,31 @@ async function main() {
     logger.warn({ err }, 'Person linking failed — skipping');
   }
 
+  // Post-ingestion: run LLM extraction for researcher instances
+  try {
+    await runResearcherExtraction(allIngestedActivities);
+  } catch (err) {
+    logger.warn({ err }, 'Researcher extraction failed — skipping');
+  }
+
   await writeStatusFile(store, 'success');
   await closeGraphStore();
   console.log('Ingestion complete');
 }
 
-main().catch(async (err) => {
-  logger.error(err, 'Ingestion failed');
-  console.error('Ingestion failed:', err.message);
-  try {
-    const store = await getGraphStore();
-    await writeStatusFile(store, 'error');
-  } catch { /* best effort */ }
-  await closeGraphStore();
-  process.exit(1);
-});
+// Only run main() when executed directly (not imported)
+const isDirectRun = process.argv[1]?.endsWith('index.ts') || process.argv[1]?.endsWith('index.js');
+if (isDirectRun) {
+  main().catch(async (err) => {
+    logger.error(err, 'Ingestion failed');
+    console.error('Ingestion failed:', err.message);
+    try {
+      const store = await getGraphStore();
+      await writeStatusFile(store, 'error');
+    } catch { /* best effort */ }
+    await closeGraphStore();
+    process.exit(1);
+  });
+}
+
+export { main };

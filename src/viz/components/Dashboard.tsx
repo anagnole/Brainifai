@@ -13,11 +13,11 @@ const TYPE_COLORS: Record<string, string> = {
 };
 
 function TypeBadge({ type }: { type: string }) {
-  const bg = TYPE_COLORS[type] ?? TYPE_COLORS.general;
+  const color = TYPE_COLORS[type] ?? TYPE_COLORS.general;
   return (
     <span
       className="instance-type-badge"
-      style={{ background: bg }}
+      style={{ color, borderColor: color }}
     >
       {type}
     </span>

@@ -17,10 +17,7 @@ install() {
     <string>$PROJECT_DIR/scripts/start.sh</string>
   </array>
   <key>RunAtLoad</key>         <true/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>  <false/>
-  </dict>
+  <key>StartInterval</key>    <integer>1800</integer>
   <key>StandardOutPath</key>   <string>$PROJECT_DIR/logs/brainifai.log</string>
   <key>StandardErrorPath</key> <string>$PROJECT_DIR/logs/brainifai.log</string>
   <key>WorkingDirectory</key>  <string>$PROJECT_DIR</string>

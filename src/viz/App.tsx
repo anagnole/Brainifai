@@ -2,14 +2,15 @@ import { Component, type ReactNode, useSyncExternalStore } from 'react';
 import { GraphExplorer } from './components/GraphExplorer';
 import { Dashboard } from './components/Dashboard';
 import { IngestPage } from './components/IngestPage';
+import { SourcesPage } from './components/SourcesPage';
 
 /* ── Hash-based router ── */
 
-type Route = '/' | '/graph' | '/ingest';
+type Route = '/' | '/graph' | '/ingest' | '/sources';
 
 function getHash(): Route {
   const raw = window.location.hash.replace(/^#/, '') || '/';
-  if (raw === '/graph' || raw === '/ingest') return raw;
+  if (raw === '/graph' || raw === '/ingest' || raw === '/sources') return raw;
   return '/';
 }
 
@@ -32,6 +33,7 @@ const NAV_ITEMS: Array<{ route: Route; label: string }> = [
   { route: '/', label: 'Dashboard' },
   { route: '/graph', label: 'Graph' },
   { route: '/ingest', label: 'Ingest' },
+  { route: '/sources', label: 'Sources' },
 ];
 
 /* ── Sidebar ── */
@@ -68,6 +70,8 @@ function PageContent({ route }: { route: Route }) {
       return <GraphExplorer />;
     case '/ingest':
       return <IngestPage />;
+    case '/sources':
+      return <SourcesPage />;
     default:
       return <Dashboard />;
   }

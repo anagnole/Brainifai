@@ -16,6 +16,7 @@
     "launch:status": "bash scripts/launchagent.sh status",
     "launch:logs": "tail -f logs/brainifai.log",
     "test": "vitest run",
+    "smoke": "tsx src/scripts/smoke-test.ts",
     "viz:dev": "npx concurrently \"tsx --env-file=.env src/api/server.ts\" \"npx vite --config src/viz/vite.config.ts\"",
     "viz:build": "npx vite build --config src/viz/vite.config.ts",
     "viz": "npm run viz:build && tsx --env-file=.env src/api/server.ts"
@@ -35,6 +36,7 @@
     "graphology-types": "^0.24.8",
     "kuzu": "^0.11.3",
     "pino": "^9.6.0",
+    "playwright": "^1.59.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "sigma": "^3.0.2",

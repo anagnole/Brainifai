@@ -180,6 +180,54 @@ export async function fetchIngestStatus(): Promise<IngestStatus> {
   return res.json();
 }
 
+/* ── Sources management ── */
+
+export interface SourcesData {
+  slack: { configured: boolean; tokenSet: boolean; tokenMasked: string | null; items: string[] };
+  github: { configured: boolean; tokenSet: boolean; tokenMasked: string | null; items: string[] };
+  clickup: { configured: boolean; tokenSet: boolean; tokenMasked: string | null; items: string[] };
+  'apple-calendar': { configured: boolean; usernameSet: boolean; usernameMasked: string | null; passwordSet: boolean; calendars: string[] };
+  'claude-code': { configured: boolean; projectsPath: string };
+  global: { backfillDays: number; topicAllowlist: string[] };
+  [key: string]: unknown;
+}
+
+export async function fetchSources(): Promise<SourcesData> {
+  const res = await fetch(`${BASE}/sources`);
+  if (!res.ok) throw new Error('Failed to fetch sources');
+  return res.json();
+}
+
+export async function updateSourceItems(source: string, items: string[]): Promise<void> {
+  const body = source === 'apple-calendar' ? { calendars: items } : { items };
+  await fetch(`${BASE}/sources/${encodeURIComponent(source)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateSourceToken(
+  source: string,
+  creds: { token?: string; username?: string; password?: string },
+): Promise<void> {
+  await fetch(`${BASE}/sources/${encodeURIComponent(source)}/token`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(creds),
+  });
+}
+
+export async function updateGlobalSettings(
+  settings: { backfillDays?: number; topicAllowlist?: string[] },
+): Promise<void> {
+  await fetch(`${BASE}/sources/global`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  });
+}
+
 export function startIngestion(
   onMessage: (msg: string) => void,
   onDone: () => void,
