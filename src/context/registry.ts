@@ -122,5 +122,20 @@ export async function createBaseRegistry(): Promise<ContextFunctionRegistry> {
   registry.register(getDependencyGraphFn);
   registry.register(getClaudeSessionHistoryFn);
 
+  // Researcher functions — research domain knowledge graph queries
+  const {
+    getLandscapeFn,
+    getEntityTimelineFn,
+    getTrendingFn,
+    getEntityNetworkFn,
+    searchEventsFn,
+  } = await import('./functions/researcher.js');
+
+  registry.register(getLandscapeFn);
+  registry.register(getEntityTimelineFn);
+  registry.register(getTrendingFn);
+  registry.register(getEntityNetworkFn);
+  registry.register(searchEventsFn);
+
   return registry;
 }

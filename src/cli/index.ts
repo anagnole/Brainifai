@@ -7,6 +7,7 @@ import { describeCommand } from './commands/describe.js';
 import { doctorCommand } from './commands/doctor.js';
 import { removeCommand } from './commands/remove.js';
 import { ingestCommand } from './commands/ingest.js';
+import { twitterAuthCommand } from './commands/twitter-auth.js';
 
 const program = new Command();
 
@@ -22,5 +23,6 @@ program.addCommand(describeCommand());
 program.addCommand(doctorCommand());
 program.addCommand(removeCommand());
 program.addCommand(ingestCommand());
+program.addCommand(twitterAuthCommand());
 
 await program.parseAsync();

@@ -21,6 +21,7 @@ export interface InstanceConfig {
   description: string;          // human/AI-readable summary
   parent: string | null;        // parent instance name (null for global)
   sources: SourceSubscription[];
+  domain?: string;              // research domain (e.g., "artificial intelligence", "cryptocurrency")
   contextFunctions?: string[];  // which MCP tools/context functions are active
   recentActivities?: RecentActivity[];  // last 5 activities (FIFO)
   createdAt: string;            // ISO 8601

@@ -363,7 +363,7 @@ async function ingestTwitter(store: GraphStore) {
   const config = getTwitterConfig();
   const client = getTwitterClient(config.cookies);
 
-  await verifyTwitterAuth(client);
+  await verifyTwitterAuth(client, config.usernames[0]);
 
   const backfillSince = new Date(
     Date.now() - config.backfillDays * 86400 * 1000,
@@ -371,38 +371,43 @@ async function ingestTwitter(store: GraphStore) {
 
   // --- User timelines ---
   for (const username of config.usernames) {
-    logger.info({ username }, 'Processing Twitter user timeline');
+    try {
+      logger.info({ username }, 'Processing Twitter user timeline');
 
-    const cursorKey = `${username}:timeline`;
-    const cursorVal = await getCursor(store, 'twitter', cursorKey);
-    const since = cursorVal ? new Date(cursorVal) : backfillSince;
+      const cursorKey = `${username}:timeline`;
+      const cursorVal = await getCursor(store, 'twitter', cursorKey);
+      const since = cursorVal ? new Date(cursorVal) : backfillSince;
 
-    let totalIngested = 0;
-    let latestTs = cursorVal ?? backfillSince.toISOString();
+      let totalIngested = 0;
+      let latestTs = cursorVal ?? backfillSince.toISOString();
 
-    for await (const page of fetchUserTweets(client, username, since)) {
-      const normalized: NormalizedMessage[] = [];
+      for await (const page of fetchUserTweets(client, username, since)) {
+        const normalized: NormalizedMessage[] = [];
 
-      for (const tweet of page) {
-        const result = normalizeTweet(tweet, username, 'user_timeline', config.topicAllowlist);
-        if (result) {
-          normalized.push(result);
-          if (tweet.created_at > latestTs) latestTs = tweet.created_at;
+        for (const tweet of page) {
+          const result = normalizeTweet(tweet, username, 'user_timeline', config.topicAllowlist);
+          if (result) {
+            normalized.push(result);
+            if (tweet.created_at > latestTs) latestTs = tweet.created_at;
+          }
         }
+
+        for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
+          await upsertBatch(store, normalized.slice(i, i + UPSERT_BATCH_SIZE));
+        }
+
+        totalIngested += normalized.length;
       }
 
-      for (let i = 0; i < normalized.length; i += UPSERT_BATCH_SIZE) {
-        await upsertBatch(store, normalized.slice(i, i + UPSERT_BATCH_SIZE));
+      if (latestTs !== (cursorVal ?? backfillSince.toISOString())) {
+        await setCursor(store, 'twitter', cursorKey, latestTs);
       }
 
-      totalIngested += normalized.length;
+      console.log(`Twitter @${username}: ingested ${totalIngested} tweets`);
+    } catch (err) {
+      logger.warn({ username, err }, 'Failed to ingest Twitter user — skipping');
+      console.error(`Twitter @${username}: SKIPPED — ${err instanceof Error ? err.message : String(err)}`);
     }
-
-    if (latestTs !== (cursorVal ?? backfillSince.toISOString())) {
-      await setCursor(store, 'twitter', cursorKey, latestTs);
-    }
-
-    console.log(`Twitter @${username}: ingested ${totalIngested} tweets`);
   }
 
   // --- Search queries ---
@@ -689,7 +694,7 @@ async function collectClaudeCode(store: GraphStore): Promise<NormalizedMessage[]
 async function collectTwitter(store: GraphStore): Promise<NormalizedMessage[]> {
   const config = getTwitterConfig();
   const client = getTwitterClient(config.cookies);
-  await verifyTwitterAuth(client);
+  await verifyTwitterAuth(client, config.usernames[0]);
 
   const backfillSince = new Date(
     Date.now() - config.backfillDays * 86400 * 1000,
@@ -697,23 +702,27 @@ async function collectTwitter(store: GraphStore): Promise<NormalizedMessage[]> {
   const collected: NormalizedMessage[] = [];
 
   for (const username of config.usernames) {
-    const cursorKey = `${username}:timeline`;
-    const cursorVal = await getCursor(store, 'twitter', cursorKey);
-    const since = cursorVal ? new Date(cursorVal) : backfillSince;
-    let latestTs = cursorVal ?? backfillSince.toISOString();
+    try {
+      const cursorKey = `${username}:timeline`;
+      const cursorVal = await getCursor(store, 'twitter', cursorKey);
+      const since = cursorVal ? new Date(cursorVal) : backfillSince;
+      let latestTs = cursorVal ?? backfillSince.toISOString();
 
-    for await (const page of fetchUserTweets(client, username, since)) {
-      for (const tweet of page) {
-        const result = normalizeTweet(tweet, username, 'user_timeline', config.topicAllowlist);
-        if (result) {
-          collected.push(result);
-          if (tweet.created_at > latestTs) latestTs = tweet.created_at;
+      for await (const page of fetchUserTweets(client, username, since)) {
+        for (const tweet of page) {
+          const result = normalizeTweet(tweet, username, 'user_timeline', config.topicAllowlist);
+          if (result) {
+            collected.push(result);
+            if (tweet.created_at > latestTs) latestTs = tweet.created_at;
+          }
         }
       }
-    }
 
-    if (latestTs !== (cursorVal ?? backfillSince.toISOString())) {
-      await setCursor(store, 'twitter', cursorKey, latestTs);
+      if (latestTs !== (cursorVal ?? backfillSince.toISOString())) {
+        await setCursor(store, 'twitter', cursorKey, latestTs);
+      }
+    } catch (err) {
+      logger.warn({ username, err }, 'Failed to collect Twitter user — skipping');
     }
   }
 
@@ -824,11 +833,6 @@ async function writeStatusFile(store: GraphStore, status: 'success' | 'error') {
  * open their graph stores, and run LLM extraction on recently ingested activities.
  */
 async function runResearcherExtraction(ingestedActivities: NormalizedMessage[]): Promise<void> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    logger.info('ANTHROPIC_API_KEY not set — skipping researcher extraction');
-    return;
-  }
   if (ingestedActivities.length === 0) {
     logger.info('No activities to extract — skipping researcher extraction');
     return;
@@ -870,7 +874,6 @@ async function runResearcherExtraction(ingestedActivities: NormalizedMessage[]):
         ingestedActivities,
         instance.domain,
         researcherStore,
-        apiKey,
       );
 
       console.log(
@@ -935,6 +938,12 @@ async function main() {
     logger.info('GITHUB_TOKEN not set — skipping GitHub ingestion');
   }
 
+  if (process.env.TWITTER_COOKIES) {
+    sources.push({ name: 'Twitter', ingestFn: () => ingestTwitter(store), collectFn: () => collectTwitter(store) });
+  } else {
+    logger.info('TWITTER_COOKIES not set — skipping Twitter ingestion');
+  }
+
   if (process.env.CLICKUP_TOKEN) {
     sources.push({ name: 'ClickUp', ingestFn: () => ingestClickUp(store), collectFn: () => collectClickUp(store) });
   } else {
@@ -945,12 +954,6 @@ async function main() {
     sources.push({ name: 'Apple Calendar', ingestFn: () => ingestAppleCalendar(store), collectFn: () => collectAppleCalendar(store) });
   } else {
     logger.info('APPLE_CALDAV_USERNAME not set — skipping Apple Calendar ingestion');
-  }
-
-  if (process.env.TWITTER_COOKIES) {
-    sources.push({ name: 'Twitter', ingestFn: () => ingestTwitter(store), collectFn: () => collectTwitter(store) });
-  } else {
-    logger.info('TWITTER_COOKIES not set — skipping Twitter ingestion');
   }
 
   const ccProjectsPath = process.env.CLAUDE_CODE_PROJECTS_PATH
@@ -1030,16 +1033,21 @@ async function main() {
 // Only run main() when executed directly (not imported)
 const isDirectRun = process.argv[1]?.endsWith('index.ts') || process.argv[1]?.endsWith('index.js');
 if (isDirectRun) {
-  main().catch(async (err) => {
-    logger.error(err, 'Ingestion failed');
-    console.error('Ingestion failed:', err.message);
-    try {
-      const store = await getGraphStore();
-      await writeStatusFile(store, 'error');
-    } catch { /* best effort */ }
-    await closeGraphStore();
-    process.exit(1);
-  });
+  main()
+    .then(() => {
+      // Force clean exit before Kuzu native cleanup can segfault
+      process.exit(0);
+    })
+    .catch(async (err) => {
+      logger.error(err, 'Ingestion failed');
+      console.error('Ingestion failed:', err.message);
+      try {
+        const store = await getGraphStore();
+        await writeStatusFile(store, 'error');
+      } catch { /* best effort */ }
+      await closeGraphStore();
+      process.exit(1);
+    });
 }
 
 export { main };

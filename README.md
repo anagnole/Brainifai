@@ -5,7 +5,7 @@ A federated Personal Knowledge Graph (PKG) system. Data flows in from your work 
 ## How it works
 
 ```
-Slack / GitHub / ClickUp / Apple Calendar / Claude Code sessions
+Slack / GitHub / ClickUp / Apple Calendar / Twitter/X / Claude Code sessions
    |  fetch + normalize (incremental, cursor-based)
    v
 Global Instance (~/.brainifai/)
@@ -17,6 +17,7 @@ Global Instance (~/.brainifai/)
    +-- Manager Instance       -> people context, meeting summaries
    +-- Project Manager        -> cross-project health, dependencies, Claude session history
    +-- EHR Instance           -> clinical queries (patients, meds, labs, conditions)
+   +-- Researcher Instance    -> domain knowledge graph (entities, events, trends, metrics)
    +-- General Instance       -> broad cross-topic search
    v
 MCP Servers (stdio, per-instance)
@@ -33,11 +34,11 @@ src/
   api/              Fastify REST API (graph visualization, ingestion triggers)
   cli/              CLI commands (init, status, list, describe, doctor, remove, ingest)
   context/          Context function registry, per-instance resolution
-    functions/      Base tools + coding bridge + EHR + project-manager
+    functions/      Base tools + coding bridge + EHR + project-manager + researcher
   event-bus/        File-based pub/sub for inter-instance messaging
-  graphstore/       Kuzu adapter, on-demand wrapper, EHR + project-manager schemas
+  graphstore/       Kuzu adapter, on-demand wrapper, EHR + project-manager + researcher schemas, researcher-adapter
   hooks/            PreToolUse (KG context injection), SessionStart
-  ingestion/        Slack, GitHub, ClickUp, Apple Calendar, Claude Code, project-manager
+  ingestion/        Slack, GitHub, ClickUp, Apple Calendar, Twitter/X (raw fetch, cookie auth), Claude Code, project-manager, researcher/ (LLM extraction), researcher-pipeline/ (self-contained ingestion)
   instance/         Instance model, templates, init, resolve, lifecycle, skill generator
   mcp/              MCP server, instance-aware tool registration
   orchestrator/     AI classifier, router, data delivery (Claude Haiku subprocess)
@@ -58,6 +59,7 @@ bin/
 | **Apple Calendar** | CalDAV events from iCloud |
 | **Claude Code** | Session files, conversation summaries |
 | **Git repos** | Commits, branches, dependencies (auto-scanned from ~/Projects) |
+| **Twitter/X** | User timelines, search results (raw fetch + cookie auth) |
 
 All sources are optional — each is skipped if its credentials are not set. Ingestion is incremental and cursor-based.
 
@@ -92,6 +94,15 @@ All sources are optional — each is skipped if its credentials are not set. Ing
 | `Commit` | `commit_id` | A git commit |
 | `Dependency` | `dep_id` | Package dependency between projects |
 
+**Researcher schema** (domain knowledge instances):
+
+| Node | Key | Represents |
+|------|-----|------------|
+| `ResearchEntity` | `entity_key` | A company, product, person, project, or technology |
+| `ResearchEvent` | `event_key` | A release, acquisition, partnership, or milestone |
+| `ResearchTrend` | `trend_key` | An emerging theme or pattern |
+| `ResearchMetric` | `metric_key` | A quantitative measure (benchmark, funding, etc.) |
+
 ## Instance types
 
 Instances are bootstrapped from templates that configure which context functions are active:
@@ -102,6 +113,7 @@ Instances are bootstrapped from templates that configure which context functions
 | **manager** | Slack, Calendar, ClickUp | Base 5 + `get_people_context`, `get_meeting_summary` |
 | **project-manager** | Git repos (auto-scanned) | `search_projects`, `get_project_health`, `get_project_activity`, `get_cross_project_impact`, `find_stale_projects`, `get_dependency_graph`, `get_claude_session_history` |
 | **ehr** | Static clinical data | `search_patients`, `get_patient_summary`, `get_medications`, `get_diagnoses`, `get_labs`, `get_temporal_relation`, `find_cohort` |
+| **researcher** | Twitter/X (+ any source) | Base 4 + `get_landscape`, `get_entity_timeline`, `get_trending`, `get_entity_network`, `search_events` |
 | **general** | All sources | Base 5 (broad context, cross-topic) |
 
 Base tools (all non-EHR instances): `search_entities`, `get_entity_summary`, `get_recent_activity`, `get_context_packet`, `ingest_memory`.
@@ -141,15 +153,22 @@ Edit `.env` with your credentials. All sources are optional.
 | `APPLE_CALDAV_CALENDARS` | Calendar names to sync (empty = all) |
 | `BACKFILL_DAYS` | Days to backfill on first run (default: `7`) |
 | `TOPIC_ALLOWLIST` | Comma-separated keywords for topic extraction |
+| `TWITTER_COOKIES` | Twitter/X session cookies (`auth_token=...; ct0=...`) |
+| `TWITTER_USERNAMES` | Comma-separated Twitter handles to track |
+| `TWITTER_SEARCH_QUERIES` | Comma-separated search queries |
 
 ### CLI
 
 ```bash
 bin/brainifai.js init                    # Create global instance (~/.brainifai/)
 bin/brainifai.js init --type coding      # Create project instance in cwd
+bin/brainifai.js init --type researcher  # Create researcher instance in cwd
 bin/brainifai.js status                  # Show instance health
 bin/brainifai.js list                    # List all instances
 bin/brainifai.js doctor                  # Diagnose connectivity issues
+bin/brainifai.js twitter-auth            # Authenticate with Twitter/X
+bin/brainifai.js ingest --instance <name> # Run dedicated instance ingestion
+bin/brainifai.js ingest --instance <name> --extract-only  # Re-run LLM extraction only
 ```
 
 ### Run
@@ -216,6 +235,8 @@ The system is built around a tree of instances coordinated by a global orchestra
 - OnDemand graph store for MCP/hooks — avoids write lock contention with ingestion
 - Each instance self-describes so the orchestrator can route without hardcoded rules
 - Cross-source identity resolution links the same person across Slack, GitHub, and email
+- LLM extraction via @anagnole/claude-cli-wrapper — uses Claude CLI subscription, not Anthropic API
+- Researcher instances have dedicated ingestion pipelines (like project-manager) — no orchestrator needed
 
 ## Tech stack
 
@@ -224,9 +245,10 @@ The system is built around a tree of instances coordinated by a global orchestra
 - **MCP**: `@modelcontextprotocol/sdk` (stdio transport)
 - **API**: Fastify + WebSocket
 - **Visualization**: React 19, Sigma.js v3, Graphology
+- **LLM integration**: [@anagnole/claude-cli-wrapper](https://www.npmjs.com/package/@anagnole/claude-cli-wrapper) (unified provider for Claude CLI)
 - **CLI**: Commander
 - **Testing**: Vitest
-- **Sources**: Slack Web API, Octokit, tsdav (CalDAV), ClickUp REST API
+- **Sources**: Slack Web API, Octokit, tsdav (CalDAV), ClickUp REST API, Twitter/X (raw fetch)
 
 ## License
 

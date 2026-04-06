@@ -28,4 +28,4 @@ export const SLACK_PAGE_SIZE = 200;
 // Orchestrator
 export const ORCHESTRATOR_BATCH_MAX_CHARS = 50_000;  // max total snippet chars per batch
 export const ORCHESTRATOR_BATCH_MAX_MESSAGES = 200;   // hard cap on messages per batch
-export const ORCHESTRATOR_TIMEOUT_MS = 120_000;
+export const ORCHESTRATOR_TIMEOUT_MS = 300_000;

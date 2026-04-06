@@ -52,6 +52,36 @@ export const overviewRoute: FastifyPluginAsync = async (app) => {
       }
     }
 
+    // Researcher schema nodes — only present on researcher instances.
+    // Each query is wrapped in try/catch so non-researcher instances are unaffected.
+    const researcherTables: Array<{
+      label: string;
+      keyProp: string;
+      nameProp?: string;
+    }> = [
+      { label: 'ResearchEntity', keyProp: 'entity_key', nameProp: 'name' },
+      { label: 'ResearchEvent', keyProp: 'event_key', nameProp: 'title' },
+      { label: 'ResearchTrend', keyProp: 'trend_key', nameProp: 'name' },
+      { label: 'ResearchMetric', keyProp: 'metric_key', nameProp: 'name' },
+    ];
+
+    for (const rt of researcherTables) {
+      try {
+        const rows = await store.findNodes(rt.label, {}, { limit: 500 });
+        for (const r of rows) {
+          const id = r.properties[rt.keyProp] as string;
+          if (id && !nodeIds.has(id)) {
+            const name = (rt.nameProp ? (r.properties[rt.nameProp] as string) : undefined) ?? id;
+            nodes.push({ id, type: rt.label, name });
+            nodeIds.add(id);
+            seeds.push({ label: rt.label, key: { [rt.keyProp]: id }, id });
+          }
+        }
+      } catch {
+        // Table doesn't exist on this instance — skip
+      }
+    }
+
     if (seeds.length === 0) {
       return { nodes: [], edges: [] };
     }

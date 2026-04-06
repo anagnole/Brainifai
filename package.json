@@ -22,6 +22,7 @@
     "viz": "npm run viz:build && tsx --env-file=.env src/api/server.ts"
   },
   "dependencies": {
+    "@anagnole/claude-cli-wrapper": "^0.3.1",
     "@fastify/cors": "^11.2.0",
     "@fastify/static": "^9.0.0",
     "@fastify/websocket": "^11.2.0",

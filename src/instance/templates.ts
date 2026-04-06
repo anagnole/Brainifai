@@ -60,6 +60,21 @@ export const TEMPLATES: Record<string, InstanceTemplate> = {
       'get_dependency_graph', 'get_claude_session_history',
     ],
   },
+  researcher: {
+    type: 'researcher',
+    description: 'Domain researcher instance — tracks entities, events, trends, and metrics in a configurable domain (AI, crypto, biotech, etc.) via LLM extraction from ingested activities',
+    sources: [
+      { source: 'twitter', enabled: true },
+      { source: 'slack', enabled: true },
+      { source: 'github', enabled: true },
+    ],
+    contextFunctions: [
+      'get_context_packet', 'search_entities', 'get_entity_summary',
+      'get_recent_activity',
+      'get_landscape', 'get_entity_timeline', 'get_trending',
+      'get_entity_network', 'search_events',
+    ],
+  },
   general: {
     type: 'general',
     description: 'Broad instance — subscribes to all available sources',

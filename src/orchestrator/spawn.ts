@@ -71,7 +71,7 @@ export async function spawnOrchestrator(
     'Bash', 'Write', 'Edit', 'Glob', 'Grep', 'Agent', 'WebSearch', 'WebFetch',
     '--permission-mode', 'bypassPermissions',
     '--max-turns', '50',
-    '--max-budget-usd', '1.00',
+    '--max-budget-usd', '5.00',
     '--', userPrompt,
   ];
 
@@ -87,8 +87,9 @@ export async function spawnOrchestrator(
     });
 
     let stderr = '';
+    let stdout = '';
 
-    child.stdout?.on('data', () => { /* discard */ });
+    child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
     child.stderr?.on('data', (chunk: Buffer) => {
       stderr += chunk.toString();
     });
@@ -118,8 +119,8 @@ export async function spawnOrchestrator(
         logger.info({ source: sourceName, globalCount: globalIndices.length }, 'Orchestrator completed');
         resolvePromise({ success: true, globalIndices });
       } else {
-        const errorMsg = `Orchestrator exited with code ${code}: ${stderr.slice(0, 500)}`;
-        logger.error({ source: sourceName, code, stderr: stderr.slice(0, 500) }, 'Orchestrator failed');
+        const errorMsg = `Orchestrator exited with code ${code}: stderr=${stderr.slice(0, 500)} stdout=${stdout.slice(0, 500)}`;
+        logger.error({ source: sourceName, code, stderr: stderr.slice(0, 500), stdout: stdout.slice(0, 500) }, 'Orchestrator failed');
         resolvePromise({ success: false, globalIndices, error: errorMsg });
       }
     });
