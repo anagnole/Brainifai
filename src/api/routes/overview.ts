@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { getGraphStore } from '../../shared/graphstore.js';
+import { getCurrentDbPath } from './graph-instance.js';
 import type { SubgraphNode, SubgraphEdge } from '../../graphstore/types.js';
 
 /**
@@ -8,7 +9,8 @@ import type { SubgraphNode, SubgraphEdge } from '../../graphstore/types.js';
  */
 export const overviewRoute: FastifyPluginAsync = async (app) => {
   app.get('/overview', async () => {
-    const store = await getGraphStore();
+    const dbPath = getCurrentDbPath();
+    const store = await getGraphStore(dbPath ?? undefined);
 
     // Fetch all entity nodes
     const [people, topics, containers] = await Promise.all([
@@ -77,8 +79,8 @@ export const overviewRoute: FastifyPluginAsync = async (app) => {
             seeds.push({ label: rt.label, key: { [rt.keyProp]: id }, id });
           }
         }
-      } catch {
-        // Table doesn't exist on this instance — skip
+      } catch (err) {
+        console.error(`[overview] Failed to query ${rt.label}:`, (err as Error).message?.slice(0, 100));
       }
     }
 

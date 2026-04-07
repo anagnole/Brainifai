@@ -5,8 +5,14 @@ import { listInstances } from '../../instance/registry.js';
 import { resolveInstanceDbPath, GLOBAL_BRAINIFAI_PATH } from '../../instance/resolve.js';
 import { logger } from '../../shared/logger.js';
 
-/** Track which instance name is currently active (null = default resolved path). */
+/** Track which instance name and DB path are currently active. */
 let currentInstanceName: string | null = null;
+let currentDbPath: string | null = null;
+
+/** Get the currently switched DB path (null = use default). */
+export function getCurrentDbPath(): string | null {
+  return currentDbPath;
+}
 
 export const graphInstanceRoute: FastifyPluginAsync = async (app) => {
   /**
@@ -64,6 +70,7 @@ export const graphInstanceRoute: FastifyPluginAsync = async (app) => {
       await store.initialize();
 
       currentInstanceName = name;
+      currentDbPath = dbPath;
       logger.info({ instance: name, dbPath }, 'Switched graph instance');
 
       return { ok: true, instance: name, dbPath };

@@ -245,6 +245,10 @@ body {
 .type-badge.Topic { color: var(--topic); border: 1px solid var(--topic); }
 .type-badge.Container { color: var(--container); border: 1px solid var(--container); }
 .type-badge.Activity { color: var(--activity); border: 1px solid var(--activity); }
+.type-badge.ResearchEntity { color: #E06C75; border: 1px solid #E06C75; }
+.type-badge.ResearchEvent { color: #C678DD; border: 1px solid #C678DD; }
+.type-badge.ResearchTrend { color: #E5C07B; border: 1px solid #E5C07B; }
+.type-badge.ResearchMetric { color: #56B6C2; border: 1px solid #56B6C2; }
 
 /* Node detail */
 .node-detail {

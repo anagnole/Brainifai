@@ -319,6 +319,13 @@ export class KuzuGraphStore implements GraphStore {
       OWNS: 'SourceAccount',      // SourceAccount→Activity
       REPLIES_TO: 'Activity',     // Activity→Activity (reply→parent)
       MENTIONS_PERSON: 'Activity',// Activity→Person (mention)
+      // Researcher schema relationships
+      INVOLVED_IN: 'ResearchEvent',         // ResearchEntity→ResearchEvent
+      ENTITY_RELATED_TO: 'ResearchEntity',  // ResearchEntity→ResearchEntity
+      MEASURED_BY: 'ResearchMetric',         // ResearchEntity→ResearchMetric
+      PART_OF_TREND: 'ResearchTrend',        // ResearchEvent→ResearchTrend
+      ENTITY_MENTIONED_IN: 'Activity',       // ResearchEntity→Activity
+      EVENT_MENTIONED_IN: 'Activity',        // ResearchEvent→Activity
     };
 
     for (const relTable of this.allRelTypes()) {
@@ -776,6 +783,10 @@ export class KuzuGraphStore implements GraphStore {
       case 'Activity': return `${alias}.source_id`;
       case 'Topic': return `${alias}.name`;
       case 'SourceAccount': return `${alias}.source + ':' + ${alias}.account_id`;
+      case 'ResearchEntity': return `${alias}.entity_key`;
+      case 'ResearchEvent': return `${alias}.event_key`;
+      case 'ResearchTrend': return `${alias}.trend_key`;
+      case 'ResearchMetric': return `${alias}.metric_key`;
       default: return `${alias}.name`;
     }
   }
@@ -784,6 +795,7 @@ export class KuzuGraphStore implements GraphStore {
     switch (label) {
       case 'Person': return `${alias}.display_name`;
       case 'Activity': return `${alias}.snippet`;
+      case 'ResearchEvent': return `${alias}.title`;
       default: return `${alias}.name`;
     }
   }
@@ -791,6 +803,11 @@ export class KuzuGraphStore implements GraphStore {
   // resolveEntityId is now imported from ../resolve-entity.js
 
   private allRelTypes(): string[] {
-    return Object.values(REL_TYPE_MAP);
+    return [
+      ...Object.values(REL_TYPE_MAP),
+      // Researcher schema rels (may not exist on all instances — neighborhood() catches errors)
+      'INVOLVED_IN', 'ENTITY_RELATED_TO', 'MEASURED_BY',
+      'PART_OF_TREND', 'ENTITY_MENTIONED_IN', 'EVENT_MENTIONED_IN',
+    ];
   }
 }
