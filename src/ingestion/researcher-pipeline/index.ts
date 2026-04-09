@@ -50,13 +50,13 @@ export async function runResearcherIngestion(opts: ResearcherIngestOptions): Pro
   const startMs = Date.now();
   const { dbPath, domain = 'general', verbose = false, force = false, extractOnly = false } = opts;
 
-  // Open two stores pointing at the same DB:
-  // - baseStore: for base schema operations (Activity, Person, Topic, Container, Cursor)
-  // - researchStore: for researcher-specific tables (ResearchEntity, ResearchEvent, etc.)
+  // Open ONE Kuzu Database, then share its connection between the base and
+  // researcher adapters. Opening two Database instances on the same file
+  // causes multi-writer race conditions and silent data loss.
   const baseStore = new KuzuGraphStore({ dbPath, readOnly: false });
   await baseStore.initialize();
 
-  const researchStore = new ResearcherGraphStore({ dbPath, readOnly: false });
+  const researchStore = new ResearcherGraphStore({ conn: baseStore.getConnection() });
   await researchStore.initialize();
 
   if (force) {

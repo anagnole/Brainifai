@@ -139,15 +139,34 @@ export interface UpsertTrendInput {
 // ─── ResearcherGraphStore ───────────────────────────────────────────────────
 
 export class ResearcherGraphStore {
-  private db: InstanceType<typeof kuzu.Database>;
+  private db: InstanceType<typeof kuzu.Database> | null;
   private conn: InstanceType<typeof kuzu.Connection>;
 
   private readOnly: boolean;
+  private ownsConnection: boolean;
 
-  constructor(config: { dbPath: string; readOnly?: boolean }) {
+  /**
+   * Create a ResearcherGraphStore. Two modes:
+   * - { dbPath, readOnly? } — opens a new Kuzu Database (owns the connection)
+   * - { conn } — reuses an existing connection (does NOT open a new Database)
+   *
+   * Use the conn variant when you already have a KuzuGraphStore open on the
+   * same file, to avoid the multi-writer file lock conflicts.
+   */
+  constructor(config:
+    | { dbPath: string; readOnly?: boolean }
+    | { conn: InstanceType<typeof kuzu.Connection>; readOnly?: boolean }
+  ) {
     this.readOnly = config.readOnly ?? false;
-    this.db = new kuzu.Database(config.dbPath, 0, true, this.readOnly);
-    this.conn = new kuzu.Connection(this.db);
+    if ('conn' in config) {
+      this.db = null;
+      this.conn = config.conn;
+      this.ownsConnection = false;
+    } else {
+      this.db = new kuzu.Database(config.dbPath, 0, true, this.readOnly);
+      this.conn = new kuzu.Connection(this.db);
+      this.ownsConnection = true;
+    }
   }
 
   async initialize(): Promise<void> {
@@ -162,8 +181,10 @@ export class ResearcherGraphStore {
   }
 
   async close(): Promise<void> {
-    await this.conn.close();
-    await this.db.close();
+    if (this.ownsConnection) {
+      await this.conn.close();
+      if (this.db) await this.db.close();
+    }
   }
 
   /** Delete all researcher data. Relationships are removed via DETACH DELETE. */

@@ -56,6 +56,11 @@ function firstResult(r: KuzuQueryResult | KuzuQueryResult[]): KuzuQueryResult {
 export class KuzuGraphStore implements GraphStore {
   private db: InstanceType<typeof kuzu.Database>;
   private conn: InstanceType<typeof kuzu.Connection>;
+
+  /** Get the underlying Kuzu connection (for sharing with adapters like ResearcherGraphStore). */
+  getConnection(): InstanceType<typeof kuzu.Connection> {
+    return this.conn;
+  }
   private ftsBuilt = false;
   private readonly readOnly: boolean;
 
