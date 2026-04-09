@@ -94,15 +94,15 @@ export const RESEARCHER_REL_TABLES = [
 // ─── FTS Indexes (3) ──────────────────────────────────────────────────────────
 
 export const RESEARCHER_FTS_INDEXES = [
-  `CALL CREATE_FTS_INDEX('ResearchEntity', 'research_entity_fts', ['name', 'description'])`,
-  `CALL CREATE_FTS_INDEX('ResearchEvent', 'research_event_fts', ['title', 'description'])`,
-  `CALL CREATE_FTS_INDEX('ResearchTrend', 'research_trend_fts', ['name'])`,
+  `CALL CREATE_FTS_INDEX('ResearchEntity', 'researcher_entity_idx', ['name', 'description'])`,
+  `CALL CREATE_FTS_INDEX('ResearchEvent', 'researcher_event_idx', ['title', 'description'])`,
+  `CALL CREATE_FTS_INDEX('ResearchTrend', 'researcher_trend_idx', ['name'])`,
 ];
 
 export const RESEARCHER_FTS_DROP = [
-  `CALL DROP_FTS_INDEX('ResearchEntity', 'research_entity_fts')`,
-  `CALL DROP_FTS_INDEX('ResearchEvent', 'research_event_fts')`,
-  `CALL DROP_FTS_INDEX('ResearchTrend', 'research_trend_fts')`,
+  `CALL DROP_FTS_INDEX('ResearchEntity', 'researcher_entity_idx')`,
+  `CALL DROP_FTS_INDEX('ResearchEvent', 'researcher_event_idx')`,
+  `CALL DROP_FTS_INDEX('ResearchTrend', 'researcher_trend_idx')`,
 ];
 
 // ─── Schema lifecycle functions ───────────────────────────────────────────────
@@ -114,13 +114,13 @@ export async function createResearcherSchema(conn: { query: (stmt: string) => Pr
 
 export async function createResearcherFtsIndexes(conn: { query: (stmt: string) => Promise<unknown> }): Promise<void> {
   for (const stmt of RESEARCHER_FTS_INDEXES) {
-    try { await conn.query(stmt); } catch { /* table may be empty */ }
+    try { await conn.query(stmt); } catch { /* table may be empty or index already exists */ }
   }
 }
 
 export async function rebuildResearcherFtsIndexes(conn: { query: (stmt: string) => Promise<unknown> }): Promise<void> {
   for (const stmt of RESEARCHER_FTS_DROP) {
-    try { await conn.query(stmt); } catch { /* index may not exist */ }
+    try { await conn.query(stmt); } catch { /* index may not exist on first run */ }
   }
   await createResearcherFtsIndexes(conn);
 }

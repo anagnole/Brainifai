@@ -91,20 +91,32 @@ export async function runResearcherIngestion(opts: ResearcherIngestOptions): Pro
       }
 
       log(verbose, 'Running LLM extraction (via Claude CLI)...');
+      let entitiesCount = 0, eventsCount = 0, trendsCount = 0;
       try {
         const extractionResult = await extractAndUpsertResearcherData(activities, domain, researchStore);
-        log(verbose, `  Extracted: ${extractionResult.entitiesCount} entities, ${extractionResult.eventsCount} events, ${extractionResult.trendsCount} trends`);
-        return {
-          tweets: activities.length,
-          entities: extractionResult.entitiesCount,
-          events: extractionResult.eventsCount,
-          trends: extractionResult.trendsCount,
-          durationMs: Date.now() - startMs,
-        };
+        entitiesCount = extractionResult.entitiesCount;
+        eventsCount = extractionResult.eventsCount;
+        trendsCount = extractionResult.trendsCount;
+        log(verbose, `  Extracted: ${entitiesCount} entities, ${eventsCount} events, ${trendsCount} trends`);
       } catch (err) {
         log(verbose, `  Extraction failed — ${err instanceof Error ? err.message : String(err)}`);
-        return { tweets: activities.length, entities: 0, events: 0, trends: 0, durationMs: Date.now() - startMs };
       }
+
+      log(verbose, 'Rebuilding FTS indexes...');
+      try {
+        await researchStore.rebuildFtsIndexes();
+        log(verbose, '  FTS indexes rebuilt');
+      } catch (err) {
+        log(verbose, `  FTS rebuild failed — ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      return {
+        tweets: activities.length,
+        entities: entitiesCount,
+        events: eventsCount,
+        trends: trendsCount,
+        durationMs: Date.now() - startMs,
+      };
     }
 
     // ── Phase 1: Config ──────────────────────────────────────────────────────

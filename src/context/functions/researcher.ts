@@ -34,7 +34,7 @@ export const getLandscapeFn: ContextFunction = {
   description:
     'Get an overview of top entities, recent events, and active trends in a domain over a time window',
   schema: {
-    domain: z.string().describe('Research domain to query'),
+    domain: z.string().optional().describe('Research domain to query (omit for all)'),
     days: z.number().int().min(1).default(7)
       .describe('Look-back window in days'),
     limit: z.number().int().min(1).max(50).default(20)
@@ -42,7 +42,7 @@ export const getLandscapeFn: ContextFunction = {
   },
   async execute(input) {
     const { domain, days, limit } = input as {
-      domain: string;
+      domain?: string;
       days?: number;
       limit?: number;
     };
@@ -81,7 +81,7 @@ export const getTrendingFn: ContextFunction = {
   description:
     'Compare entity and trend activity between current and previous time windows to find what is spiking',
   schema: {
-    domain: z.string().describe('Research domain to query'),
+    domain: z.string().optional().describe('Research domain to query (omit for all)'),
     current_days: z.number().int().min(1).default(3)
       .describe('Current window in days'),
     compare_days: z.number().int().min(1).default(7)
@@ -89,7 +89,7 @@ export const getTrendingFn: ContextFunction = {
   },
   async execute(input) {
     const { domain, current_days, compare_days } = input as {
-      domain: string;
+      domain?: string;
       current_days?: number;
       compare_days?: number;
     };

@@ -142,14 +142,19 @@ export class ResearcherGraphStore {
   private db: InstanceType<typeof kuzu.Database>;
   private conn: InstanceType<typeof kuzu.Connection>;
 
+  private readOnly: boolean;
+
   constructor(config: { dbPath: string; readOnly?: boolean }) {
-    this.db = new kuzu.Database(config.dbPath, 0, true, config.readOnly ?? false);
+    this.readOnly = config.readOnly ?? false;
+    this.db = new kuzu.Database(config.dbPath, 0, true, this.readOnly);
     this.conn = new kuzu.Connection(this.db);
   }
 
   async initialize(): Promise<void> {
     await this.conn.query('LOAD EXTENSION fts');
-    await createResearcherSchema(this.conn);
+    if (!this.readOnly) {
+      await createResearcherSchema(this.conn);
+    }
   }
 
   async rebuildFtsIndexes(): Promise<void> {
@@ -299,11 +304,18 @@ export class ResearcherGraphStore {
    * Get a landscape overview for a domain: top entities by mention count,
    * recent events, and active trends.
    */
-  async getLandscape(domain: string, since: string, limit = 20): Promise<LandscapeReport> {
+  async getLandscape(domain: string | undefined, since: string, limit = 20): Promise<LandscapeReport> {
+    // If domain is empty/undefined, match any domain (no filter)
+    const domainFilter = domain ? 'e.domain = $domain AND ' : '';
+    const trendDomainFilter = domain ? 't.domain = $domain AND ' : '';
+    const eventDomainFilter = domain ? '{domain: $domain}' : '';
+    const params: Record<string, KuzuValue> = { since };
+    if (domain) params.domain = domain;
+
     const [entityRows, eventRows, trendRows] = await Promise.all([
       this.query(
         `MATCH (e:ResearchEntity)
-         WHERE e.domain = $domain
+         ${domain ? 'WHERE e.domain = $domain' : ''}
          OPTIONAL MATCH (e)-[:ENTITY_MENTIONED_IN]->(a:Activity)
          WHERE a.timestamp >= $since
          RETURN e.entity_key AS entity_key, e.name AS name, e.type AS type,
@@ -312,32 +324,32 @@ export class ResearcherGraphStore {
                 count(a) AS mention_count
          ORDER BY mention_count DESC
          LIMIT ${limit}`,
-        { domain, since },
+        params,
       ),
       this.query(
         `MATCH (ev:ResearchEvent)
          WHERE ev.date >= $since
-         OPTIONAL MATCH (e:ResearchEntity {domain: $domain})-[:INVOLVED_IN]->(ev)
+         OPTIONAL MATCH (e:ResearchEntity ${eventDomainFilter})-[:INVOLVED_IN]->(ev)
          WITH ev, count(e) AS entity_count
-         WHERE entity_count > 0
+         ${domain ? 'WHERE entity_count > 0' : ''}
          RETURN ev.event_key AS event_key, ev.title AS title, ev.date AS date,
                 ev.description AS description, ev.significance AS significance,
                 ev.event_type AS event_type, ev.created_at AS created_at,
                 ev.updated_at AS updated_at
          ORDER BY ev.date DESC
          LIMIT ${limit}`,
-        { since, domain },
+        params,
       ),
       this.query(
         `MATCH (t:ResearchTrend)
-         WHERE t.domain = $domain AND t.last_seen >= $since
+         WHERE ${trendDomainFilter}t.last_seen >= $since
          RETURN t.trend_key AS trend_key, t.name AS name,
                 t.first_seen AS first_seen, t.last_seen AS last_seen,
                 t.domain AS domain, t.created_at AS created_at,
                 t.updated_at AS updated_at
          ORDER BY t.last_seen DESC
          LIMIT ${limit}`,
-        { domain, since },
+        params,
       ),
     ]);
 
@@ -375,10 +387,15 @@ export class ResearcherGraphStore {
   /**
    * Find entities and trends spiking in the current window vs a previous window.
    */
-  async getTrending(domain: string, currentSince: string, compareSince: string): Promise<TrendingReport> {
+  async getTrending(domain: string | undefined, currentSince: string, compareSince: string): Promise<TrendingReport> {
+    const entityFilter = domain ? '{domain: $domain}' : '';
+    const trendFilter = domain ? '{domain: $domain}' : '';
+    const params: Record<string, KuzuValue> = { currentSince, compareSince };
+    if (domain) params.domain = domain;
+
     const [entityRows, trendRows] = await Promise.all([
       this.query(
-        `MATCH (e:ResearchEntity {domain: $domain})
+        `MATCH (e:ResearchEntity ${entityFilter})
          OPTIONAL MATCH (e)-[:ENTITY_MENTIONED_IN]->(a1:Activity)
            WHERE a1.timestamp >= $currentSince
          WITH e, count(a1) AS current_mentions
@@ -392,10 +409,10 @@ export class ResearcherGraphStore {
                 current_mentions, previous_mentions
          ORDER BY current_mentions DESC
          LIMIT 20`,
-        { domain, currentSince, compareSince },
+        params,
       ),
       this.query(
-        `MATCH (t:ResearchTrend {domain: $domain})
+        `MATCH (t:ResearchTrend ${trendFilter})
          OPTIONAL MATCH (ev1:ResearchEvent)-[:PART_OF_TREND]->(t)
            WHERE ev1.date >= $currentSince
          WITH t, count(ev1) AS current_events
@@ -410,7 +427,7 @@ export class ResearcherGraphStore {
                 current_events, previous_events
          ORDER BY current_events DESC
          LIMIT 20`,
-        { domain, currentSince, compareSince },
+        params,
       ),
     ]);
 
@@ -509,7 +526,7 @@ export class ResearcherGraphStore {
 
     // FTS returns matching events; we post-filter by domain/date/type
     const rows = await this.query(
-      `CALL QUERY_FTS_INDEX('ResearchEvent', 'research_event_fts', '${safeQuery}')
+      `CALL QUERY_FTS_INDEX('ResearchEvent', 'researcher_event_idx', '${safeQuery}')
        RETURN node.event_key AS event_key, node.title AS title, node.date AS date,
               node.description AS description, node.significance AS significance,
               node.event_type AS event_type, node.created_at AS created_at,
