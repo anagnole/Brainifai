@@ -435,13 +435,16 @@ async function runQueries(engine: any): Promise<QueryResult[]> {
     kahneHits.length >= 2,
     `returned ${kahneHits.length} hits`);
 
-  // Q8: associate("5k") — recurring theme over 4 runs
+  // Q8: associate("5k") — recurring theme over 4 runs. With vector search in
+  // the mix, some tangentially-related concept atoms will surface; the real
+  // check is that all 4 direct 5k-run atoms are present.
   log('\n[Q8] associate({cue: "5k"}) — recurring running theme');
   const runHits = await associate(engine, { cue: '5k', limit: 10 });
   for (const h of runHits) log(`    · score=${h.score.toFixed(2)} ${truncate(h.atom.content, 70)}`);
-  record('associate("5k") finds all 4 run logs',
-    runHits.length === 4,
-    `returned ${runHits.length} hits`);
+  const runAtomsFound = runHits.filter((h) => /5k run|5k in/.test(h.atom.content)).length;
+  record('associate("5k") surfaces all 4 run logs',
+    runAtomsFound === 4,
+    `${runAtomsFound} of 4 run atoms in top-${runHits.length}`);
 
   // Q9: recall_episode — all decisions
   log('\n[Q9] recall_episode({kind: "decision"}) — all decisions across the corpus');
@@ -502,6 +505,46 @@ async function runQueries(engine: any): Promise<QueryResult[]> {
   record('Brainifai is a hub (has ≥4 ASSOCIATED edges)',
     brainifai.length >= 4,
     `${brainifai.length} associations`);
+
+  // Q16: supersedes-by-cue — fresh consolidate with `supersedes: "<natural cue>"`
+  // should find + link the correct prior atom via embedding similarity.
+  log('\n[Q16] consolidate({supersedes: "the event-bus orchestrator decision"}) — fuzzy correction');
+  const correction = await consolidate(engine, {
+    content: 'On second thought, even the cascade pattern is overkill — just log to a flat file.',
+    kind: 'correction',
+    salience: 'high',
+    cwd: CWD_BRAINIFAI,
+    supersedes: 'the event-bus orchestrator decision',
+  });
+  const linkedIds = correction.superseded;
+  // Look up the content of whatever was linked
+  const conn2 = engine.getConnection();
+  if (linkedIds.length > 0) {
+    const linkedPs = await conn2.prepare(`MATCH (a:Atom {id: $id}) RETURN a.content AS c`);
+    const linked = await (Array.isArray(await conn2.execute(linkedPs, { id: linkedIds[0] }))
+      ? (await conn2.execute(linkedPs, { id: linkedIds[0] }))[0]!
+      : await conn2.execute(linkedPs, { id: linkedIds[0] })).getAll() as Array<{ c: string }>;
+    if (linked[0]) log(`    · linked to: ${truncate(linked[0].c, 70)}`);
+  } else {
+    log('    · no atom linked');
+  }
+  const correctionCorrect = linkedIds.length === 1;
+  record('supersedes cue resolves to a prior atom via embedding',
+    correctionCorrect,
+    `linked ${linkedIds.length} atoms`);
+
+  // Q15p: paraphrase query — NO entity is literally named "the book" in the
+  // corpus, so this can only resolve via embedding similarity. Should find
+  // the Kahneman / Pragmatic Programmer memories.
+  log('\n[Q15p] associate({cue: "the book I was reading"}) — paraphrase via embeddings');
+  const paraHits = await associate(engine, { cue: 'the book I was reading', limit: 5 });
+  for (const h of paraHits) log(`    · score=${h.score.toFixed(2)} ${truncate(h.atom.content, 70)}`);
+  const bookFound = paraHits.some((h) =>
+    /Thinking Fast|Pragmatic Programmer|Kahneman|tracer bullets/.test(h.atom.content),
+  );
+  record('associate("the book I was reading") finds reading atoms via semantic match',
+    bookFound,
+    `found: ${bookFound}`);
 
   // Q15: cross-context entity — Maria appears in personal cwd, should be there
   log('\n[Q15] associate("Maria") — personal scope entity');

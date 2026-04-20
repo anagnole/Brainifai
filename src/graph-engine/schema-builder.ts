@@ -16,6 +16,8 @@ export interface GeneratedDdl {
   ftsIndexes: string[];
   /** FTS index drops (for rebuilds). */
   ftsDrops: string[];
+  /** Vector index specs (one per embedding column). Empty when embeddings disabled. */
+  vectorIndexes: VectorIndexSpec[];
 }
 
 const DEFAULT_TABLE_NAMES = {
@@ -123,7 +125,24 @@ export function buildDdl(spec: SchemaSpec): GeneratedDdl {
     `CALL DROP_FTS_INDEX('${atomTable}', 'atom_fts')`,
   );
 
-  return { nodeTables, relTables, migrations, ftsIndexes, ftsDrops };
+  return { nodeTables, relTables, migrations, ftsIndexes, ftsDrops, vectorIndexes: buildVectorIndexes(spec) };
+}
+
+export interface VectorIndexSpec {
+  table: string;
+  column: 'embedding';
+  indexName: string;
+  metric: 'cosine';
+}
+
+function buildVectorIndexes(spec: SchemaSpec): VectorIndexSpec[] {
+  if (!spec.embeddingsEnabled) return [];
+  const atomTable = spec.atomTableName ?? DEFAULT_TABLE_NAMES.atom;
+  const entityTable = spec.entityTableName ?? DEFAULT_TABLE_NAMES.entity;
+  return [
+    { table: atomTable, column: 'embedding', indexName: `${atomTable.toLowerCase()}_emb_idx`, metric: 'cosine' },
+    { table: entityTable, column: 'embedding', indexName: `${entityTable.toLowerCase()}_emb_idx`, metric: 'cosine' },
+  ];
 }
 
 // ─── Table builders ─────────────────────────────────────────────────────────

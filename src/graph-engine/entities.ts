@@ -5,6 +5,9 @@
 import kuzu from 'kuzu';
 import { ulid } from 'ulid';
 import type { Entity, EntityType, SchemaSpec } from './types.js';
+import type { GraphEngineInstance } from './instance.js';
+import { embed } from './embedding.js';
+import { vectorSearchEntities } from './vector.js';
 
 type Conn = InstanceType<typeof kuzu.Connection>;
 
@@ -113,42 +116,80 @@ export async function findEntitiesByPartialName(
   return rows.map(rowToEntity);
 }
 
+/** A seed returned by resolveCueToSeeds — entity plus the confidence this is
+ * what the user meant. Callers use confidence as the initial activation score
+ * for spread, so weak semantic matches propagate less influence than exact
+ * lexical matches. */
+export interface SeedEntity {
+  entity: Entity;
+  confidence: number;   // 0..1
+}
+
 /**
- * Full cue-to-seeds resolution: tries FTS → exact → CI → per-token CI →
- * partial match, in that order. Deduplicates by id. Used by the general
- * instance's associate() and recall_episode() so both take the same path.
+ * Full cue-to-seeds resolution: FTS → exact → CI → per-token CI → partial
+ * match → semantic vector search. Each match method assigns a confidence:
+ *   - exact name / FTS / CI exact → 1.0
+ *   - partial name → 0.7
+ *   - vector (paraphrase)         → actual cosine similarity
+ * If an entity is found by multiple methods, its highest confidence wins.
  */
 export async function resolveCueToSeeds(
   conn: Conn,
   spec: SchemaSpec,
   cue: string,
   maxSeeds = 10,
-): Promise<Entity[]> {
-  const seen = new Map<string, Entity>();
-  const add = (arr: Entity[]) => { for (const e of arr) if (!seen.has(e.id)) seen.set(e.id, e); };
+  engine?: GraphEngineInstance,
+): Promise<SeedEntity[]> {
+  const byId = new Map<string, SeedEntity>();
+  const add = (entity: Entity, confidence: number) => {
+    const existing = byId.get(entity.id);
+    if (!existing || existing.confidence < confidence) {
+      byId.set(entity.id, { entity, confidence });
+    }
+  };
 
-  // 1. FTS
-  try { add(await searchEntitiesByName(conn, spec, cue, maxSeeds)); } catch { /* swallow */ }
+  // 1. FTS — strong signal
+  try {
+    for (const h of await searchEntitiesByName(conn, spec, cue, maxSeeds)) add(h, 1.0);
+  } catch { /* swallow */ }
 
   // 2. Exact name
   const exact = await findEntityByExactName(conn, spec, cue);
-  if (exact) add([exact]);
+  if (exact) add(exact, 1.0);
 
   // 3. Case-insensitive whole-cue match
-  add(await findEntitiesByNameCI(conn, spec, cue, maxSeeds));
+  for (const h of await findEntitiesByNameCI(conn, spec, cue, maxSeeds)) add(h, 1.0);
 
   // 4. Token-wise CI match (helps multi-word cues)
   const tokens = cue.split(/\s+/).filter((t) => t.length >= 3);
   for (const t of tokens) {
-    add(await findEntitiesByNameCI(conn, spec, t, maxSeeds));
+    for (const h of await findEntitiesByNameCI(conn, spec, t, maxSeeds)) add(h, 0.85);
   }
 
-  // 5. Partial match — always run, so "Anna" (an exact CI hit) also pulls in
-  //    "Anna Smith", and short cues like "5k" pull in "5k run".
-  add(await findEntitiesByPartialName(conn, spec, cue, maxSeeds));
-  for (const t of tokens) add(await findEntitiesByPartialName(conn, spec, t, maxSeeds));
+  // 5. Partial match — lower confidence since "Anna" matches "Anna Smith".
+  for (const h of await findEntitiesByPartialName(conn, spec, cue, maxSeeds)) add(h, 0.7);
+  for (const t of tokens) {
+    for (const h of await findEntitiesByPartialName(conn, spec, t, maxSeeds)) add(h, 0.6);
+  }
 
-  return [...seen.values()].slice(0, maxSeeds);
+  // 6. Vector search — paraphrase tolerance. Confidence = raw cosine so
+  //    semantically-similar-but-not-identical entities (e.g. "Maria" vs "Lisa"
+  //    at ~0.65) seed weaker than exact matches. Threshold is modest (0.4) so
+  //    real paraphrases ("the book I was reading" vs "Thinking Fast and Slow")
+  //    still make it through — the confidence weighting handles the rest.
+  if (engine && spec.embeddingsEnabled) {
+    try {
+      const queryVec = await embed(cue);
+      const hits = await vectorSearchEntities(engine, queryVec, maxSeeds);
+      for (const h of hits) {
+        if (h.similarity >= 0.4) add(h.item, h.similarity);
+      }
+    } catch { /* model unavailable — lexical methods handled most cases */ }
+  }
+
+  return [...byId.values()]
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, maxSeeds);
 }
 
 /** Bump mention_count by 1 and refresh last_seen. */

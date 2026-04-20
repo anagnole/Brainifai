@@ -24,9 +24,13 @@ import {
   markAtomExtracted,
   fetchAtomById,
 } from './occurrences.js';
+import { embed, embedBatch } from './embedding.js';
 import type { GraphEngineInstance } from './instance.js';
-import type { ClaimedJob, EntityType } from './types.js';
+import type { ClaimedJob, EntityType, SchemaSpec } from './types.js';
+import kuzu from 'kuzu';
 import { logger } from '../shared/logger.js';
+
+type Conn = InstanceType<typeof kuzu.Connection>;
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -133,10 +137,23 @@ export async function processOneJob(
     return 'done';
   }
 
-  // ── 2. OUTSIDE the lock: LLM call ─────────────────────────────────────────
+  // ── 2. OUTSIDE the lock: LLM extraction + embeddings ─────────────────────
   let entities: ExtractedEntity[];
+  let atomEmbedding: number[] | null = null;
+  let entityEmbeddings: number[][] = [];
   try {
     entities = await extract(atom.content);
+    entities = entities.filter((e) => e && e.name && e.name.trim().length > 0);
+
+    if (spec.embeddingsEnabled) {
+      // Compute atom + entity embeddings in parallel while the lock is free.
+      const [atomVec, entityVecs] = await Promise.all([
+        embed(atom.content),
+        entities.length > 0 ? embedBatch(entities.map((e) => e.name)) : Promise.resolve([] as number[][]),
+      ]);
+      atomEmbedding = atomVec;
+      entityEmbeddings = entityVecs;
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.warn({ jobId: job.id, atomId: atom.id, err: msg }, 'Extraction failed');
@@ -151,9 +168,6 @@ export async function processOneJob(
     return 'failed';
   }
 
-  // Filter out nameless entries the LLM might have produced.
-  entities = entities.filter((e) => e && e.name && e.name.trim().length > 0);
-
   // ── 3. Under lock: resolve + write MENTIONS + CO_OCCURS + mark done ───────
   try {
     await withLock(engine.lockPath, async () => {
@@ -162,15 +176,22 @@ export async function processOneJob(
       // Resolve each extracted entity. Order matters slightly: previously
       // resolved entities are visible to subsequent ones via the graph.
       const resolvedIds: string[] = [];
-      for (const entity of entities) {
+      for (let i = 0; i < entities.length; i++) {
+        const entity = entities[i]!;
         const decision = await resolveEntity(engine, entity.name, entity.type, {
           cwd: atom.cwd || null,
           source_instance: atom.source_instance,
           coEntities: entities
-            .filter((o) => o.name !== entity.name)
+            .filter((_, j) => j !== i)
             .map((o) => ({ name: o.name, type: o.type })),
         });
         resolvedIds.push(decision.entityId);
+
+        // Store embedding on the entity row if we computed one and the
+        // resolver created a new entity for it.
+        if (spec.embeddingsEnabled && entityEmbeddings[i] && decision.kind !== 'existing') {
+          await setEntityEmbedding(conn, spec, decision.entityId, entityEmbeddings[i]!);
+        }
       }
 
       // MENTIONS edges (idempotent)
@@ -193,6 +214,11 @@ export async function processOneJob(
         for (let j = i + 1; j < resolvedIds.length; j++) {
           await bumpAssociation(conn, spec, associationKind, resolvedIds[i]!, resolvedIds[j]!);
         }
+      }
+
+      // Store the atom embedding.
+      if (spec.embeddingsEnabled && atomEmbedding) {
+        await setAtomEmbedding(conn, spec, atom.id, atomEmbedding);
       }
 
       await markAtomExtracted(conn, spec, atom.id);
@@ -257,4 +283,32 @@ export function startWorker(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// ─── Embedding persistence ──────────────────────────────────────────────────
+
+async function setAtomEmbedding(
+  conn: Conn,
+  spec: SchemaSpec,
+  atomId: string,
+  vec: number[],
+): Promise<void> {
+  const atomTable = spec.atomTableName ?? 'Atom';
+  const ps = await conn.prepare(`
+    MATCH (a:${atomTable} {id: $id}) SET a.embedding = $vec
+  `);
+  await conn.execute(ps, { id: atomId, vec });
+}
+
+async function setEntityEmbedding(
+  conn: Conn,
+  spec: SchemaSpec,
+  entityId: string,
+  vec: number[],
+): Promise<void> {
+  const entityTable = spec.entityTableName ?? 'Entity';
+  const ps = await conn.prepare(`
+    MATCH (e:${entityTable} {id: $id}) SET e.embedding = $vec
+  `);
+  await conn.execute(ps, { id: entityId, vec });
 }

@@ -82,14 +82,15 @@ export async function associate(
   const conn = engine.getConnection();
 
   // 1. Cue → seed entities via the shared resolution chain (FTS → exact →
-  //    CI → tokens → partial). Robust against FTS misses and capitalization
-  //    mismatches.
-  const seedEntities = await resolveCueToSeeds(conn, engine.spec, input.cue, 5);
-  if (seedEntities.length === 0) return [];
+  //    CI → tokens → partial → vector). Each seed carries a confidence
+  //    (1.0 for exact matches, lower for fuzzy / semantic ones).
+  const seeds = await resolveCueToSeeds(conn, engine.spec, input.cue, 5, engine);
+  if (seeds.length === 0) return [];
 
-  // 2. Spread activation 2 hops
+  // 2. Spread activation 2 hops. Seeds start at their confidence so a weak
+  //    semantic match propagates less influence than an exact name match.
   const activated: ActivationResult[] = await spreadActivation(engine, {
-    seeds: seedEntities.map((e) => ({ entityId: e.id, score: 1.0 })),
+    seeds: seeds.map((s) => ({ entityId: s.entity.id, score: s.confidence })),
     hops: 2,
     decay: 0.5,
     topK: 30,
@@ -200,10 +201,10 @@ export async function recall_episode(
   // 3. Optional cue rerank — use the shared seed-resolution chain
   let ranked = atoms;
   if (input.cue) {
-    const seedEntities = await resolveCueToSeeds(conn, spec, input.cue, 5);
-    if (seedEntities.length > 0) {
+    const seeds = await resolveCueToSeeds(conn, spec, input.cue, 5, engine);
+    if (seeds.length > 0) {
       const activated = await spreadActivation(engine, {
-        seeds: seedEntities.map((e) => ({ entityId: e.id, score: 1.0 })),
+        seeds: seeds.map((s) => ({ entityId: s.entity.id, score: s.confidence })),
         hops: 1,
         decay: 0.5,
       });

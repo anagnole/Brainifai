@@ -28,8 +28,13 @@ export const generalSpec: SchemaSpec = {
   retrievalCoActivationEnabled: true,
   writeMode: 'text',
 
-  // Phase 8 — embeddings are not part of MVP.
-  embeddingsEnabled: false,
+  // Local embeddings via @xenova/transformers (BGE-small-en-v1.5 at 384 dims).
+  // See docs/design/graph-engine.md §8. Used to:
+  //   - boost cue resolution (paraphrase queries)
+  //   - extend resolver candidate pool (semantic entity matches)
+  //   - seed maintenance passes (alias confirm pre-filter, dedupe)
+  embeddingsEnabled: true,
+  embeddingDim: 384,
 
   extractPrompt: generalExtractPrompt,
 

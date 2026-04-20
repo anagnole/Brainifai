@@ -74,6 +74,13 @@ export class GraphEngineInstance {
       }
     }
 
+    // Vector indexes: intentionally NOT created at init. Kuzu's vector index
+    // locks the column against SET updates ("Cannot set property X because it
+    // is used in one or more indexes"), so we must populate embeddings first
+    // and only build the index during a maintenance pass once data is stable.
+    // Until then, vector search falls back to client-side cosine scans in
+    // vector.ts — fine for <10K atoms.
+
     this.initialized = true;
     logger.info(
       { dbPath: this.dbPath, typeName: this.spec.typeName },

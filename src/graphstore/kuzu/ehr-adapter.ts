@@ -78,6 +78,8 @@ export interface EncounterRecord {
   reason_code: string;
   reason_description: string;
   provider_id: string;
+  provider_name: string | null;
+  provider_specialty: string | null;
   organization_id: string;
 }
 
@@ -178,11 +180,13 @@ export class EhrGraphStore {
       ),
       this.query(
         `MATCH (p:Patient {patient_id: $id})-[:HAD_ENCOUNTER]->(e:Encounter)
+         OPTIONAL MATCH (e)-[:TREATED_BY]->(prov:Provider)
          RETURN e.encounter_id AS encounter_id, e.encounter_class AS encounter_class,
                 e.code AS code, e.description AS description,
                 e.start_date AS start_date, e.stop_date AS stop_date,
                 e.reason_code AS reason_code, e.reason_description AS reason_description,
-                e.provider_id AS provider_id, e.organization_id AS organization_id`,
+                e.provider_id AS provider_id, e.organization_id AS organization_id,
+                prov.name AS provider_name, prov.specialty AS provider_specialty`,
         { id: patientId },
       ),
     ]);
@@ -249,6 +253,8 @@ export class EhrGraphStore {
         reason_code: r.reason_code as string,
         reason_description: r.reason_description as string,
         provider_id: r.provider_id as string,
+        provider_name: (r.provider_name as string) || null,
+        provider_specialty: (r.provider_specialty as string) || null,
         organization_id: r.organization_id as string,
       })),
     };

@@ -14,6 +14,8 @@ import { ulid } from 'ulid';
 import { withLock } from './lock.js';
 import { enqueueJob } from './queue.js';
 import { getOrCreateActiveEpisode } from './episode.js';
+import { embed } from './embedding.js';
+import { vectorSearchAtoms } from './vector.js';
 import type { GraphEngineInstance } from './instance.js';
 import type {
   WriteAtomInput,
@@ -98,9 +100,11 @@ async function writeAtomInner(
     await linkInEpisode(conn, atomTable, id, episodeId);
   }
 
-  // 3. Apply SUPERSEDES edges. For MVP: only accept explicit id(s).
-  //    Cue → id resolution lands with the resolver in a later phase.
-  const supersededIds = normalizeSupersedes(input.supersedes);
+  // 3. Apply SUPERSEDES edges. `supersedes` accepts either explicit atom ids
+  //    (ULIDs, 26 chars alphanumeric) or a free-text cue that we resolve to
+  //    atoms via embedding similarity. This makes corrections natural: users
+  //    can say `supersedes: "my earlier Neo4j decision"` instead of memorizing ids.
+  const supersededIds = await resolveSupersedesInput(engine, spec, input.supersedes);
   for (const priorId of supersededIds) {
     await addSupersedes(conn, atomTable, id, priorId, now);
   }
@@ -194,8 +198,46 @@ async function addSupersedes(
 
 // ─── Normalization ──────────────────────────────────────────────────────────
 
-function normalizeSupersedes(supersedes: string | string[] | undefined): string[] {
+/** ULIDs are 26 chars of 0-9A-Z (Crockford base32). */
+const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+
+function looksLikeAtomId(s: string): boolean {
+  return ULID_RE.test(s);
+}
+
+/**
+ * Resolve `supersedes` (id, id[], or free-text cue) to a list of prior atom
+ * ids to link via SUPERSEDES edges.
+ *
+ * - If a string looks like a ULID, treat as id.
+ * - Otherwise, vector-search atoms by embedding similarity to the cue, take
+ *   the top 1 above threshold. Empty list if nothing matches confidently.
+ */
+async function resolveSupersedesInput(
+  engine: GraphEngineInstance,
+  spec: SchemaSpec,
+  supersedes: string | string[] | undefined,
+): Promise<string[]> {
   if (!supersedes) return [];
-  if (typeof supersedes === 'string') return [supersedes];
-  return supersedes;
+  const inputs = typeof supersedes === 'string' ? [supersedes] : supersedes;
+  const ids: string[] = [];
+
+  for (const item of inputs) {
+    if (looksLikeAtomId(item)) {
+      ids.push(item);
+      continue;
+    }
+    // Fuzzy cue: vector search. Requires embeddings; no-op if disabled.
+    if (!spec.embeddingsEnabled) continue;
+    try {
+      const queryVec = await embed(item);
+      const hits = await vectorSearchAtoms(engine, queryVec, 3);
+      // Only accept confident matches — corrections should be deliberate.
+      const top = hits[0];
+      if (top && top.similarity >= 0.55) {
+        ids.push(top.item.id);
+      }
+    } catch { /* model unavailable — silently skip this cue */ }
+  }
+  return ids;
 }
