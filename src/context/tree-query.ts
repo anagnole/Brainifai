@@ -5,7 +5,9 @@ import { sendQuery, sendQueryResponse } from '../event-bus/helpers.js';
 import { getEventBus } from '../event-bus/index.js';
 import type { EventEnvelope } from '../event-bus/types.js';
 import type { QueryResponseData } from '../event-bus/messages.js';
-import { readInstanceConfig } from '../instance/resolve.js';
+import { dirname } from 'node:path';
+import { readFolderConfigAt } from '../instance/resolve.js';
+import { findInstance } from '../instance/folder-config.js';
 import { searchInstances, listInstances } from '../instance/registry.js';
 import { logger } from '../shared/logger.js';
 
@@ -33,11 +35,14 @@ export async function queryParent(
     return null;
   }
 
-  // Read instance config to find parent
+  // Read instance config to find parent. v2: instancePath is <folder>/.brainifai/<name>/;
+  // its FolderConfig is one directory up.
   let parentName: string | null;
   try {
-    const config = readInstanceConfig(instancePath);
-    parentName = config.parent;
+    const folderPath = dirname(instancePath);
+    const folderCfg = readFolderConfigAt(folderPath);
+    const inst = folderCfg ? findInstance(folderCfg, instanceName) : null;
+    parentName = inst?.parent ?? null;
   } catch {
     return null;
   }

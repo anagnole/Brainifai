@@ -1,10 +1,19 @@
 import type { InstanceConfig, SourceSubscription } from './types.js';
 
+export interface PopulateStep {
+  /** Path (relative to repo root) to the script invoked with tsx. */
+  script: string;
+  /** Prompt text shown to the user during interactive init. */
+  prompt: string;
+}
+
 export interface InstanceTemplate {
   type: string;
   description: string;
   sources: SourceSubscription[];
   contextFunctions: string[];
+  /** Optional DB-population step offered during interactive init. */
+  populate?: PopulateStep;
 }
 
 export const TEMPLATES: Record<string, InstanceTemplate> = {
@@ -21,6 +30,10 @@ export const TEMPLATES: Record<string, InstanceTemplate> = {
       'search_code', 'get_symbol_context', 'get_blast_radius', 'detect_code_changes',
       'get_pr_context', 'get_decision_log',
     ],
+    populate: {
+      script: 'src/scripts/populate-coding.ts',
+      prompt: 'Analyze this repo with GitNexus and seed the graph from git history?',
+    },
   },
   manager: {
     type: 'manager',
@@ -49,6 +62,10 @@ export const TEMPLATES: Record<string, InstanceTemplate> = {
       'get_temporal_relation',
       'find_cohort',
     ],
+    populate: {
+      script: 'src/scripts/populate-ehr.ts',
+      prompt: 'Load Synthea FHIR bundles into the EHR graph?',
+    },
   },
   'project-manager': {
     type: 'project-manager',
@@ -59,6 +76,10 @@ export const TEMPLATES: Record<string, InstanceTemplate> = {
       'get_cross_project_impact', 'find_stale_projects',
       'get_dependency_graph', 'get_claude_session_history',
     ],
+    populate: {
+      script: 'src/scripts/populate-project-manager.ts',
+      prompt: 'Scan ~/Projects/ to enumerate repositories and seed the portfolio?',
+    },
   },
   researcher: {
     type: 'researcher',
@@ -74,6 +95,10 @@ export const TEMPLATES: Record<string, InstanceTemplate> = {
       'get_landscape', 'get_entity_timeline', 'get_trending',
       'get_entity_network', 'search_events',
     ],
+    populate: {
+      script: 'src/scripts/populate-researcher.ts',
+      prompt: 'Backfill the research domain from a seed query?',
+    },
   },
   general: {
     type: 'general',

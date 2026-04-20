@@ -1,8 +1,21 @@
 import kuzu from 'kuzu';
 import { resolve } from 'path';
-import { GLOBAL_BRAINIFAI_PATH } from './resolve.js';
+import { GLOBAL_BRAINIFAI_PATH, readFolderConfigAt } from './resolve.js';
 import type { InstanceRegistryEntry } from './types.js';
 import { emitInstanceRegistered, emitInstanceUpdated, emitInstanceRemoved } from '../event-bus/helpers.js';
+
+/**
+ * Resolve the global DB path. In v2, global is a FolderConfig with one instance
+ * (usually named "global"), and the DB is at <instance-name>/data/kuzu/.
+ * Falls back to the v1 path if no FolderConfig is present (shouldn't happen
+ * post-init, but keeps read paths resilient).
+ */
+function resolveGlobalDbPath(): string {
+  const cfg = readFolderConfigAt(GLOBAL_BRAINIFAI_PATH);
+  const first = cfg?.instances[0];
+  if (first) return resolve(GLOBAL_BRAINIFAI_PATH, first.name, 'data', 'kuzu');
+  return resolve(GLOBAL_BRAINIFAI_PATH, 'data', 'kuzu');
+}
 
 /** Ensure the Instance table and PARENT_OF rel exist (idempotent) */
 async function ensureSchema(conn: InstanceType<typeof kuzu.Connection>): Promise<void> {
@@ -18,7 +31,7 @@ async function ensureSchema(conn: InstanceType<typeof kuzu.Connection>): Promise
 /** Open a short-lived connection to the global DB.
  *  Use readOnly=true for queries — allows concurrent access when another process holds the DB. */
 async function openGlobalDb(readOnly = false): Promise<{ db: InstanceType<typeof kuzu.Database>; conn: InstanceType<typeof kuzu.Connection> }> {
-  const globalDbPath = resolve(GLOBAL_BRAINIFAI_PATH, 'data', 'kuzu');
+  const globalDbPath = resolveGlobalDbPath();
   const db = new kuzu.Database(globalDbPath, 0, true, readOnly);
   let conn: InstanceType<typeof kuzu.Connection>;
   try {

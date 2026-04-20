@@ -24,17 +24,23 @@ async function main() {
   // Query the registry for children BEFORE opening the GraphStore.
   // This avoids Kuzu connection conflicts when ingest_memory needs the list later.
   try {
-    const { readInstanceConfig } = await import('../instance/resolve.js');
+    const { readFolderConfigAt } = await import('../instance/resolve.js');
+    const { findInstance } = await import('../instance/folder-config.js');
+    const { dirname } = await import('node:path');
     const entries = await listInstances({ status: 'active' });
     const children = entries
-      .filter(e => e.name !== 'global')
-      .map(e => {
+      .filter((e) => e.parent !== null)   // exclude global-folder instances
+      .map((e) => {
+        // v2: entry.path = <folder>/.brainifai/<name>/ — FolderConfig is one level up.
         let description = e.description;
         let recentActivities;
         try {
-          const config = readInstanceConfig(e.path);
-          description = config.description ?? description;
-          recentActivities = config.recentActivities;
+          const folderCfg = readFolderConfigAt(dirname(e.path));
+          const inst = folderCfg ? findInstance(folderCfg, e.name) : null;
+          if (inst) {
+            description = inst.description ?? description;
+            recentActivities = inst.recentActivities;
+          }
         } catch { /* ignore */ }
         return { name: e.name, type: e.type, description, path: e.path, recentActivities };
       });

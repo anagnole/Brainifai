@@ -1,8 +1,9 @@
 import { Command } from 'commander';
-import { resolve } from 'path';
-import { homedir } from 'os';
+import { resolve, dirname } from 'node:path';
+import { homedir } from 'node:os';
 import { getInstanceByName } from '../../instance/registry.js';
-import { readInstanceConfig } from '../../instance/resolve.js';
+import { readFolderConfigAt } from '../../instance/resolve.js';
+import { findInstance } from '../../instance/folder-config.js';
 import { runProjectManagerIngestion } from '../../ingestion/project-manager/index.js';
 import { runResearcherIngestion } from '../../ingestion/researcher-pipeline/index.js';
 
@@ -25,13 +26,12 @@ export function ingestCommand(): Command {
         extractOnly: boolean;
       };
 
-      // Look up the instance in the global registry
       let entry;
       try {
         entry = await getInstanceByName(instanceName);
       } catch (err) {
         console.error(`Error: could not read global registry — ${(err as Error).message}`);
-        console.error('Run `brainifai init` to set up the global instance first.');
+        console.error('Run `brainifai init --global` to set up the global instance first.');
         process.exitCode = 1;
         return;
       }
@@ -45,7 +45,6 @@ export function ingestCommand(): Command {
 
       if (!SUPPORTED_TYPES.includes(entry.type)) {
         console.error(`Error: instance "${instanceName}" is type "${entry.type}", not one of: ${SUPPORTED_TYPES.join(', ')}.`);
-        console.error('Only project-manager and researcher instances support the ingest command.');
         process.exitCode = 1;
         return;
       }
@@ -56,6 +55,7 @@ export function ingestCommand(): Command {
         return;
       }
 
+      // v2: entry.path = <workdir>/.brainifai/<name>/; DB at <instancePath>/data/kuzu
       const dbPath = resolve(entry.path, 'data', 'kuzu');
 
       // ── Project Manager ingestion ────────────────────────────────────────
@@ -94,13 +94,13 @@ export function ingestCommand(): Command {
 
       // ── Researcher ingestion ─────────────────────────────────────────────
       if (entry.type === 'researcher') {
-        // Read instance config to get the domain field
+        // Read the FolderConfig that owns this instance to pull the domain field.
         let domain: string | undefined;
-        try {
-          const config = readInstanceConfig(entry.path);
-          domain = config.domain;
-        } catch {
-          // Config may not exist — domain will default inside the pipeline
+        const folderPath = dirname(entry.path);
+        const folderCfg = readFolderConfigAt(folderPath);
+        if (folderCfg) {
+          const inst = findInstance(folderCfg, instanceName);
+          domain = inst?.domain;
         }
 
         if (!verbose) {
@@ -127,7 +127,6 @@ export function ingestCommand(): Command {
           console.log(`  Trends      : ${stats.trends}`);
           console.log(`  Duration    : ${secs}s`);
 
-          // Exit cleanly to avoid Kuzu segfaults on process teardown
           process.exit(0);
         } catch (err) {
           console.error(`Error: ingestion failed — ${(err as Error).message}`);

@@ -209,7 +209,7 @@ export class ProjectManagerGraphStore {
   }
 
   /** Low-level parameterized query */
-  private async query(cypher: string, params?: Record<string, KuzuValue>): Promise<Record<string, KuzuValue>[]> {
+  async query(cypher: string, params?: Record<string, KuzuValue>): Promise<Record<string, KuzuValue>[]> {
     if (params && Object.keys(params).length > 0) {
       const ps = await this.conn.prepare(cypher);
       const result = await this.conn.execute(ps, params);

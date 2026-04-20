@@ -41,6 +41,7 @@ export async function enrichToolCall(
 
   for (const kw of queryParts) {
     if (items.length >= 2) break;
+    if (!kw) continue;
     const lower = kw.toLowerCase();
 
     // Skip the project name itself — not useful context
@@ -66,7 +67,8 @@ export async function enrichToolCall(
   }
 
   if (items.length === 0) {
-    setCache(query, null);
+    // Negative-cache by storing an empty string; getCached treats '' same as a hit.
+    setCache(query, '');
     return null;
   }
 

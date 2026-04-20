@@ -1,7 +1,6 @@
 // ─── Resolve instance context for MCP server ────────────────────────────────
 
-import { resolve } from 'path';
-import { resolveInstancePath, readInstanceConfig, globalInstanceExists, GLOBAL_BRAINIFAI_PATH } from '../instance/resolve.js';
+import { resolveInstance } from '../instance/resolve.js';
 import { resolveContextFunctions } from '../context/resolve.js';
 import { logger } from '../shared/logger.js';
 
@@ -16,38 +15,28 @@ export interface McpInstanceContext {
 
 /**
  * Resolve the MCP instance context from the current working directory.
- * Falls back to null if no instance config is found (pre-multi-instance setup).
+ * Falls back to null if no instance is resolved.
  */
 export function resolveMcpContext(): McpInstanceContext | null {
   try {
-    const instancePath = resolveInstancePath();
-
-    // Check if the config file actually exists
-    let config;
-    try {
-      config = readInstanceConfig(instancePath);
-    } catch {
-      // No config found — pre-multi-instance setup
-      return null;
-    }
-
-    const activeFunctions = resolveContextFunctions(config);
+    const resolved = resolveInstance();
+    const activeFunctions = resolveContextFunctions(resolved.config);
 
     logger.info(
-      { instance: config.name, type: config.type, functions: activeFunctions.length },
+      { instance: resolved.config.name, type: resolved.config.type, functions: activeFunctions.length },
       'Resolved MCP instance context',
     );
 
     return {
-      instanceName: config.name,
-      instanceType: config.type,
-      description: config.description,
-      dbPath: resolve(instancePath, 'data', 'kuzu'),
+      instanceName: resolved.config.name,
+      instanceType: resolved.config.type,
+      description: resolved.config.description,
+      dbPath: resolved.dbPath,
       activeFunctions,
-      parentName: config.parent,
+      parentName: resolved.config.parent,
     };
   } catch (err) {
-    logger.warn({ err }, 'Failed to resolve MCP instance context, using defaults');
+    logger.warn({ err: (err as Error).message }, 'Failed to resolve MCP instance context');
     return null;
   }
 }

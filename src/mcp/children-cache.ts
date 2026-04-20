@@ -1,13 +1,22 @@
 /** Cached children list, queried once at MCP server startup before GraphStore opens. */
 
-import type { InstanceContext } from '../orchestrator/types.js';
+import type { RecentActivity } from '../instance/types.js';
 
-let cache: InstanceContext[] | null = null;
+/** Minimal child-instance info used by memory-routing code. */
+export interface ChildInstanceContext {
+  name: string;
+  type: string;
+  description: string;
+  path: string;
+  recentActivities?: RecentActivity[];
+}
 
-export function setChildrenCache(children: InstanceContext[]): void {
+let cache: ChildInstanceContext[] | null = null;
+
+export function setChildrenCache(children: ChildInstanceContext[]): void {
   cache = children;
 }
 
-export function getChildrenCache(): InstanceContext[] | null {
+export function getChildrenCache(): ChildInstanceContext[] | null {
   return cache;
 }

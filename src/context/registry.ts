@@ -84,6 +84,9 @@ export async function createBaseRegistry(): Promise<ContextFunctionRegistry> {
   registry.register(ehr.labsFn);
   registry.register(ehr.temporalRelationFn);
   registry.register(ehr.findCohortFn);
+  registry.register(ehr.findObservationConceptsFn);
+  registry.register(ehr.aggregateObservationForCohortFn);
+  registry.register(ehr.countCohortFn);
 
   // Cross-instance function — only activated when instance has a parent
   const { broaderContextFn } = await import('./functions/cross-instance.js');

@@ -1,37 +1,60 @@
 import { Command } from 'commander';
-import { findProjectInstance, readInstanceConfig, writeInstanceConfig, globalInstanceExists, GLOBAL_BRAINIFAI_PATH } from '../../instance/resolve.js';
+import {
+  resolveInstance,
+  readFolderConfigAt,
+  globalInstanceExists,
+} from '../../instance/resolve.js';
+import { writeFolderConfig, updateInstance } from '../../instance/folder-config.js';
 import { syncDescription } from '../../instance/registry.js';
 
 export function describeCommand(): Command {
   return new Command('describe')
-    .description('Update the instance description')
+    .description('Update an instance description')
     .argument('<description>', 'New description text')
-    .action(async (description: string) => {
-      const projectPath = findProjectInstance();
-      const instancePath = projectPath ?? (globalInstanceExists() ? GLOBAL_BRAINIFAI_PATH : null);
-
-      if (!instancePath) {
-        console.error('No Brainifai instance found. Run `brainifai init` first.');
+    .option('--instance <name>', 'Instance name (required if folder has multiple)')
+    .action(async (description: string, opts: { instance?: string }) => {
+      if (!globalInstanceExists()) {
+        console.error('No Brainifai instance found. Run `brainifai init --global` first.');
         process.exitCode = 1;
         return;
       }
 
-      const config = readInstanceConfig(instancePath);
-      const previous = config.description;
-      config.description = description;
-      config.updatedAt = new Date().toISOString();
-      writeInstanceConfig(instancePath, config);
+      let resolved;
+      try {
+        resolved = resolveInstance(undefined, opts.instance);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+        return;
+      }
 
-      // Sync to global registry if this is a child
-      if (config.parent) {
+      const folderCfg = readFolderConfigAt(resolved.folderPath);
+      if (!folderCfg) {
+        console.error(`No FolderConfig at ${resolved.folderPath}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      const previous = resolved.config.description;
+      const updated = {
+        ...resolved.config,
+        description,
+        updatedAt: new Date().toISOString(),
+      };
+      writeFolderConfig(
+        resolved.folderPath,
+        updateInstance(folderCfg, resolved.config.name, updated),
+      );
+
+      if (resolved.config.parent) {
         try {
-          await syncDescription(config.name, description);
+          await syncDescription(resolved.config.name, description);
         } catch {
           console.warn('Warning: Failed to sync description to global registry.');
         }
       }
 
-      console.log(`Updated description for "${config.name}"`);
+      console.log(`Updated description for "${resolved.config.name}"`);
       console.log(`  Previous: ${previous}`);
       console.log(`  New:      ${description}`);
     });

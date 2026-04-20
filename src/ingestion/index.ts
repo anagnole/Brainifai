@@ -31,7 +31,8 @@ import { normalizeTweet } from './twitter/normalize.js';
 import { extractAndUpsertResearcherData } from './researcher/index.js';
 import { ResearcherGraphStore } from '../graphstore/kuzu/researcher-adapter.js';
 import { findInstancesByType } from '../instance/registry.js';
-import { readInstanceConfig } from '../instance/resolve.js';
+import { readFolderConfigAt } from '../instance/resolve.js';
+import { findInstance as findInstanceInFolder } from '../instance/folder-config.js';
 
 async function ingestSlack(store: GraphStore) {
   const config = getSlackConfig();
@@ -842,10 +843,12 @@ async function runResearcherExtraction(ingestedActivities: NormalizedMessage[]):
   try {
     const entries = await findInstancesByType('researcher');
     researcherInstances = entries
-      .filter(e => e.status === 'active')
-      .map(e => {
-        const config = readInstanceConfig(e.path);
-        return { name: e.name, path: e.path, domain: config.domain ?? 'general' };
+      .filter((e) => e.status === 'active')
+      .map((e) => {
+        // v2: e.path = <folder>/.brainifai/<name>/; FolderConfig is one level up.
+        const folderCfg = readFolderConfigAt(dirname(e.path));
+        const inst = folderCfg ? findInstanceInFolder(folderCfg, e.name) : null;
+        return { name: e.name, path: e.path, domain: inst?.domain ?? 'general' };
       });
   } catch {
     logger.info('No researcher instances found — skipping extraction');
@@ -896,21 +899,26 @@ async function main() {
   const store = await getGlobalGraphStore();
   await store.initialize();
 
-  // Check for child instances to determine if orchestrator should route data
-  let children: import('../orchestrator/types.js').InstanceContext[] = [];
+  // Child instances snapshot — used by future per-instance ingestion. The
+  // central orchestrator is gone; this list is captured for observability but
+  // no fan-out happens here.
+  let children: import('../mcp/children-cache.js').ChildInstanceContext[] = [];
   try {
     const { listInstances } = await import('../instance/registry.js');
-    const { readInstanceConfig } = await import('../instance/resolve.js');
     const registryEntries = await listInstances({ status: 'active' });
     children = registryEntries
-      .filter(e => e.name !== 'global')
-      .map(e => {
+      .filter((e) => e.parent !== null)    // exclude global-folder instances
+      .map((e) => {
+        // v2: e.path = <folder>/.brainifai/<name>/; FolderConfig is one level up.
         let description = e.description;
         let recentActivities;
         try {
-          const config = readInstanceConfig(e.path);
-          description = config.description ?? description;
-          recentActivities = config.recentActivities;
+          const folderCfg = readFolderConfigAt(dirname(e.path));
+          const inst = folderCfg ? findInstanceInFolder(folderCfg, e.name) : null;
+          if (inst) {
+            description = inst.description ?? description;
+            recentActivities = inst.recentActivities;
+          }
         } catch { /* ignore */ }
         return { name: e.name, type: e.type, description, path: e.path, recentActivities };
       });
@@ -967,47 +975,26 @@ async function main() {
   // Track all ingested activities for post-ingestion researcher extraction
   const allIngestedActivities: NormalizedMessage[] = [];
 
-  if (children.length > 0) {
-    // Orchestrated mode: collect from each source, then route via Claude CLI
-    const { orchestrateSource } = await import('../orchestrator/index.js');
-    logger.info({ childCount: children.length }, 'Child instances found — using orchestrated routing');
+  // Unified direct mode: collect from each source and write to global.
+  // The cascade model (child-writes-to-parent) replaces the central
+  // orchestrator that used to fan out messages across child instances.
+  // Per-instance ingestion is the planned direction (each instance subscribes
+  // to its own sources); this legacy pipeline is kept running until per-type
+  // ingestion is migrated.
+  void children;
 
-    for (const source of sources) {
-      try {
-        const messages = await source.collectFn();
-        if (messages.length > 0) {
-          allIngestedActivities.push(...messages);
-          const result = await orchestrateSource(source.name, messages, children);
-          console.log(`${source.name}: ${result.routedToChildren} to children, ${result.routedToGlobal} to global, ${result.fallbackToGlobal} fallback`);
-          if (result.errors.length > 0) {
-            console.error(`  Errors: ${result.errors.join('; ')}`);
-          }
-        } else {
-          console.log(`${source.name}: no new data`);
-        }
-      } catch (err) {
-        logger.error({ source: source.name, err }, 'Source collection/orchestration failed');
-        console.error(`${source.name}: FAILED — ${err instanceof Error ? err.message : String(err)}`);
+  const collectResults = await Promise.allSettled(sources.map((s) => s.collectFn()));
+  for (let i = 0; i < sources.length; i++) {
+    const result = collectResults[i];
+    if (result.status === 'fulfilled' && result.value.length > 0) {
+      allIngestedActivities.push(...result.value);
+      for (let j = 0; j < result.value.length; j += UPSERT_BATCH_SIZE) {
+        await upsertBatch(store, result.value.slice(j, j + UPSERT_BATCH_SIZE));
       }
-    }
-  } else {
-    // Direct mode: collect then ingest to global (no children to route to)
-    // Collect first so we have activities available for researcher extraction
-    const collectResults = await Promise.allSettled(sources.map((s) => s.collectFn()));
-
-    for (let i = 0; i < sources.length; i++) {
-      const result = collectResults[i];
-      if (result.status === 'fulfilled' && result.value.length > 0) {
-        allIngestedActivities.push(...result.value);
-        // Upsert collected messages to global store
-        for (let j = 0; j < result.value.length; j += UPSERT_BATCH_SIZE) {
-          await upsertBatch(store, result.value.slice(j, j + UPSERT_BATCH_SIZE));
-        }
-        console.log(`${sources[i].name}: ingested ${result.value.length} items`);
-      } else if (result.status === 'rejected') {
-        logger.error({ source: sources[i].name, err: result.reason }, 'Source ingestion failed');
-        console.error(`${sources[i].name}: FAILED — ${result.reason?.message ?? result.reason}`);
-      }
+      console.log(`${sources[i].name}: ingested ${result.value.length} items`);
+    } else if (result.status === 'rejected') {
+      logger.error({ source: sources[i].name, err: result.reason }, 'Source ingestion failed');
+      console.error(`${sources[i].name}: FAILED — ${result.reason?.message ?? result.reason}`);
     }
   }
 

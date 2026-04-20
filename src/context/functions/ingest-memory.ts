@@ -7,10 +7,15 @@ import type { NormalizedMessage } from '../../shared/types.js';
 import { MAX_SNIPPET_CHARS } from '../../shared/constants.js';
 import { logger } from '../../shared/logger.js';
 import { resolveInstanceDbPath } from '../../instance/resolve.js';
-import { getChildrenCache } from '../../mcp/children-cache.js';
 
 const MEMORY_KINDS = ['decision', 'insight', 'bug_fix', 'preference', 'session_summary'] as const;
 
+/**
+ * MCP tool: save a knowledge snippet to the current instance's graph.
+ * With the cascade model (no central orchestrator), this just writes to the
+ * nearest instance. Cross-instance propagation to global will be handled by
+ * a separate cascade step once wired.
+ */
 export const ingestMemoryFn: ContextFunction = {
   name: 'ingest_memory',
   description: 'Save a knowledge snippet (decision, insight, bug fix, preference) into the knowledge graph for long-term recall',
@@ -73,44 +78,18 @@ export const ingestMemoryFn: ContextFunction = {
       topics: topics.map((t) => ({ name: t.toLowerCase() })),
     };
 
-    // Use the cached children list (queried at MCP startup, before GraphStore opened)
-    const children = getChildrenCache();
-
-    if (children && children.length > 0) {
-      try {
-        const { orchestrateSource } = await import('../../orchestrator/index.js');
-        const result = await orchestrateSource('memory', [msg], children);
-        logger.info({ sourceId, kind, routed: result.routedToChildren, global: result.routedToGlobal }, 'Memory routed via orchestrator');
-
-        return {
-          message: `Saved ${kind} via orchestrator.`,
-          topics: topics.join(', '),
-          sourceId,
-          routedToChildren: result.routedToChildren,
-          routedToGlobal: result.routedToGlobal,
-        };
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        logger.warn({ err: errMsg, sourceId }, 'Orchestrator failed — falling back to direct write');
-        // Store error for fallback response
-        (globalThis as any).__brainifai_orch_error = errMsg;
-      }
-    }
-
-    // Fallback: write directly to current instance
-    const cacheStatus = children === null ? 'null' : `${children.length} children`;
     const dbPath = resolveInstanceDbPath();
     const writeStore = new KuzuGraphStore({ dbPath, readOnly: false });
     try {
       await writeStore.initialize();
       await upsertBatch(writeStore, [msg]);
-      logger.info({ sourceId, kind, dbPath, cacheStatus }, 'Ingested memory snippet directly');
+      logger.info({ sourceId, kind, dbPath }, 'Ingested memory snippet');
     } finally {
       await writeStore.close();
     }
 
     return {
-      message: `Saved ${kind} to knowledge graph (direct write, cache: ${cacheStatus}, db: ${dbPath}, orchErr: ${(globalThis as any).__brainifai_orch_error ?? 'none'}).`,
+      message: `Saved ${kind} to knowledge graph.`,
       topics: topics.join(', '),
       sourceId,
     };

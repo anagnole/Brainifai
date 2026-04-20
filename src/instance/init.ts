@@ -1,40 +1,64 @@
-import { mkdirSync, existsSync, readFileSync, appendFileSync, rmSync } from 'fs';
-import { resolve } from 'path';
-import { GLOBAL_BRAINIFAI_PATH, writeInstanceConfig, INSTANCE_CONFIG_FILE } from './resolve.js';
+// ─── Instance initialization ────────────────────────────────────────────────
+// Creates v2 FolderConfig-based instances. Global lives at ~/.brainifai/;
+// project instances live at <workdir>/.brainifai/. Multiple instances can
+// share a single .brainifai/ folder — each gets its own subdirectory.
+
+import { mkdirSync, existsSync, readFileSync, appendFileSync } from 'node:fs';
+import { resolve, basename } from 'node:path';
+import {
+  GLOBAL_BRAINIFAI_PATH,
+  BRAINIFAI_DIR,
+  globalInstanceExists,
+} from './resolve.js';
+import {
+  tryReadFolderConfig,
+  writeFolderConfig,
+  addInstance,
+  emptyFolderConfig,
+  FOLDER_CONFIG_FILE,
+} from './folder-config.js';
 import { getTemplate, TEMPLATES } from './templates.js';
-import { generateDescription } from './descriptions.js';
+import { generateDescription, mechanicalDescription } from './descriptions.js';
 import { initializeInstanceDb } from './db.js';
 import { registerWithGlobal } from './registry.js';
 import { generateInstanceSkill } from './skill-generator.js';
-import type { InstanceConfig } from './types.js';
+import { runPopulateScript } from './populate.js';
+import type { InstanceConfig, FolderConfig } from './types.js';
+import { logger } from '../shared/logger.js';
+
+// ─── Global init ────────────────────────────────────────────────────────────
 
 export interface InitGlobalOptions {
-  type?: string;       // defaults to 'general'
+  /** Currently only `general` is supported for global. */
+  type?: string;
 }
 
-export interface InitProjectOptions {
-  name: string;
-  type: string;
-  description?: string;  // auto-generated if omitted
-  projectPath: string;   // absolute path to the project root
-  force?: boolean;       // delete and re-create if instance already exists
-}
-
-/** Create the global instance at ~/.brainifai/ */
+/**
+ * Create the global instance at ~/.brainifai/ with a single `general` instance.
+ * Throws if the global FolderConfig already exists.
+ */
 export async function initGlobalInstance(opts: InitGlobalOptions = {}): Promise<string> {
-  const configPath = resolve(GLOBAL_BRAINIFAI_PATH, INSTANCE_CONFIG_FILE);
-
-  if (existsSync(configPath)) {
-    throw new Error('Global instance already exists at ' + GLOBAL_BRAINIFAI_PATH);
+  const type = opts.type ?? 'general';
+  if (type !== 'general') {
+    throw new Error(`Global instance type must be "general" (got "${type}")`);
   }
 
-  const template = getTemplate(opts.type ?? 'general') ?? TEMPLATES.general;
-  const now = new Date().toISOString();
+  if (globalInstanceExists()) {
+    throw new Error(`Global instance already exists at ${GLOBAL_BRAINIFAI_PATH}`);
+  }
 
-  const config: InstanceConfig = {
-    name: 'global',
-    type: opts.type ?? 'general',
-    description: 'Global Brainifai instance — root of the instance tree',
+  const template = getTemplate(type) ?? TEMPLATES.general;
+  const now = new Date().toISOString();
+  const name = 'global';
+
+  const description = await safeGenerateDescription({
+    name, type, workdir: GLOBAL_BRAINIFAI_PATH, sources: template.sources,
+  });
+
+  const instanceConfig: InstanceConfig = {
+    name,
+    type,
+    description,
     parent: null,
     sources: template.sources,
     contextFunctions: template.contextFunctions,
@@ -42,100 +66,206 @@ export async function initGlobalInstance(opts: InitGlobalOptions = {}): Promise<
     updatedAt: now,
   };
 
-  // Create directories (recursive is safe if they already exist)
-  const dbPath = resolve(GLOBAL_BRAINIFAI_PATH, 'data', 'kuzu');
+  const folderConfig: FolderConfig = {
+    version: 1,
+    instances: [instanceConfig],
+  };
+
+  // Create folder + instance subdir + DB dir
   mkdirSync(GLOBAL_BRAINIFAI_PATH, { recursive: true });
+  const instancePath = resolve(GLOBAL_BRAINIFAI_PATH, name);
+  const dbPath = resolve(instancePath, 'data', 'kuzu');
+  mkdirSync(resolve(instancePath, 'data'), { recursive: true });
 
-  // Write config
-  writeInstanceConfig(GLOBAL_BRAINIFAI_PATH, config);
+  writeFolderConfig(GLOBAL_BRAINIFAI_PATH, folderConfig);
 
-  // Initialize DB schema only if the DB doesn't already exist (migration path:
-  // existing ~/.brainifai/data/kuzu from pre-instance era gets wrapped in config)
-  if (!existsSync(dbPath)) {
-    await initializeInstanceDb(dbPath, opts.type);
-  }
+  await initializeInstanceDb(dbPath, type);
 
+  logger.info({ path: GLOBAL_BRAINIFAI_PATH, dbPath }, 'Global instance initialized');
   return GLOBAL_BRAINIFAI_PATH;
 }
 
-/** Create a project instance at <projectPath>/.brainifai/ */
-export async function initProjectInstance(opts: InitProjectOptions): Promise<string> {
-  const instancePath = resolve(opts.projectPath, '.brainifai');
+// ─── Project init ───────────────────────────────────────────────────────────
 
-  if (existsSync(resolve(instancePath, INSTANCE_CONFIG_FILE))) {
-    if (opts.force) {
-      rmSync(instancePath, { recursive: true });
-    } else {
-      throw new Error('Instance already exists at ' + instancePath);
-    }
-  }
+export interface InitProjectOptions {
+  /** Absolute path to the folder the instance is bound to. */
+  workdir: string;
+  /** Instance type (e.g. `coding`, `researcher`). */
+  type: string;
+  /** Instance name. Defaults to `<basename(workdir)>-<type>`. */
+  name?: string;
+  /** Override the description. If omitted, an LLM default is generated. */
+  description?: string;
+  /** If true, offer/run the template's populate step. */
+  populate?: boolean;
+  /** If true and script exists, skip the prompt and run it. */
+  populateAuto?: boolean;
+  /** Optional domain hint (used by researcher). */
+  domain?: string;
+}
 
-  // Global must exist first
-  if (!existsSync(resolve(GLOBAL_BRAINIFAI_PATH, INSTANCE_CONFIG_FILE))) {
-    throw new Error('Global instance not found. Run `brainifai init` outside a project first.');
+/**
+ * Create a new instance in `<workdir>/.brainifai/`. If the folder already
+ * hosts other instances, appends to the existing FolderConfig. Throws on
+ * name collision — caller should auto-suffix.
+ */
+export async function initProjectInstance(opts: InitProjectOptions): Promise<{
+  folderPath: string;
+  instancePath: string;
+  dbPath: string;
+  instance: InstanceConfig;
+}> {
+  if (!globalInstanceExists()) {
+    throw new Error(
+      `Global instance not found at ${GLOBAL_BRAINIFAI_PATH}. ` +
+      `Run \`brainifai init --global\` first.`,
+    );
   }
 
   const template = getTemplate(opts.type);
-  const now = new Date().toISOString();
-  const description = opts.description ?? generateDescription(
-    opts.name,
-    opts.type,
-    template?.sources ?? [],
-  );
+  if (!template) {
+    throw new Error(
+      `Unknown instance type "${opts.type}". Available: ${Object.keys(TEMPLATES).join(', ')}`,
+    );
+  }
 
-  const config: InstanceConfig = {
-    name: opts.name,
+  const workdir = resolve(opts.workdir);
+  const folderPath = resolve(workdir, BRAINIFAI_DIR);
+
+  // Detect and report old (v1) layout: a config.json exists but isn't a FolderConfig.
+  let existingConfig = null;
+  if (existsSync(resolve(folderPath, FOLDER_CONFIG_FILE))) {
+    try {
+      existingConfig = tryReadFolderConfig(folderPath);
+    } catch {
+      throw new Error(
+        `Old layout detected at ${folderPath}. ` +
+        `Remove the .brainifai/ directory and re-run init.`,
+      );
+    }
+  }
+
+  const name = opts.name ?? defaultInstanceName(workdir, opts.type);
+  if (existingConfig?.instances.some(i => i.name === name)) {
+    throw new Error(
+      `Instance "${name}" already exists in ${folderPath}. ` +
+      `Choose a different name with --name.`,
+    );
+  }
+
+  const description = opts.description ?? await safeGenerateDescription({
+    name, type: opts.type, workdir,
+    sources: template.sources,
+    domain: opts.domain,
+  });
+
+  const now = new Date().toISOString();
+  const instanceConfig: InstanceConfig = {
+    name,
     type: opts.type,
     description,
     parent: 'global',
-    sources: template?.sources ?? [],
-    contextFunctions: template?.contextFunctions ?? [],
+    sources: template.sources,
+    contextFunctions: template.contextFunctions,
+    domain: opts.domain,
     createdAt: now,
     updatedAt: now,
   };
 
-  // Create directories — only create parent; Kuzu creates its own DB dir
+  const instancePath = resolve(folderPath, name);
   const dbPath = resolve(instancePath, 'data', 'kuzu');
+
+  // Create folder structure
   mkdirSync(resolve(instancePath, 'data'), { recursive: true });
 
-  // Write config
-  writeInstanceConfig(instancePath, config);
+  // Extend or create FolderConfig
+  const nextConfig: FolderConfig = existingConfig
+    ? addInstance(existingConfig, instanceConfig)
+    : { version: 1, instances: [instanceConfig] };
+  writeFolderConfig(folderPath, nextConfig);
 
-  // Initialize DB schema — skip for project-manager: its ingestion pipeline opens
-  // the DB and calls initialize() itself (IF NOT EXISTS DDL). Opening the DB twice
-  // in the same process causes a native Kuzu segfault.
+  // Initialize DB schema
+  // Skip for project-manager — its ingestion pipeline opens the DB itself.
   if (opts.type !== 'project-manager') {
     await initializeInstanceDb(dbPath, opts.type);
   }
 
-  // Register with global instance
-  await registerWithGlobal(opts.name, opts.type, description, instancePath, now);
+  // Register with global
+  await registerWithGlobal(name, opts.type, description, instancePath, now);
 
-  // Ensure .brainifai/ is in the project's .gitignore
-  ensureGitignore(opts.projectPath);
+  // .gitignore: only if this is the first instance in the folder
+  if (!existingConfig) {
+    ensureGitignore(workdir);
+  }
 
-  // Generate .claude/skills/brainifai/SKILL.md so Claude Code sessions get
-  // instant access to query commands without any extra setup
-  generateInstanceSkill({
-    instancePath,
-    projectPath: opts.projectPath,
-    name: opts.name,
-    type: opts.type,
-    description,
-  });
+  // Skill generator sees the whole folder
+  try {
+    generateInstanceSkill({
+      instancePath,
+      projectPath: workdir,
+      name,
+      type: opts.type,
+      description,
+    });
+  } catch (err) {
+    logger.warn({ err }, 'Skill generation failed — continuing');
+  }
 
-  return instancePath;
+  // Populate step
+  if (opts.populate && template.populate) {
+    logger.info({ script: template.populate.script }, 'Running populate script');
+    const result = await runPopulateScript(template.populate, {
+      instancePath, dbPath, instanceName: name,
+    });
+    if (!result.success) {
+      logger.warn({ result }, 'Populate script failed — instance created anyway');
+    }
+  }
+
+  return { folderPath, instancePath, dbPath, instance: instanceConfig };
 }
 
-/** Append .brainifai/ to the project's .gitignore if not already present */
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+/** Generate a description, falling back to mechanical if LLM fails. */
+async function safeGenerateDescription(input: Parameters<typeof generateDescription>[0]): Promise<string> {
+  try {
+    return await generateDescription(input);
+  } catch {
+    return mechanicalDescription(input);
+  }
+}
+
+/** `<basename(workdir)>-<type>`, unless type is 'general'. */
+function defaultInstanceName(workdir: string, type: string): string {
+  const base = basename(workdir) || 'instance';
+  return type === 'general' ? base : `${base}-${type}`;
+}
+
+/** Auto-suffix helper for callers resolving collisions externally. */
+export function resolveCollisionFreeName(
+  config: FolderConfig | null,
+  desired: string,
+): string {
+  if (!config) return desired;
+  const taken = new Set(config.instances.map(i => i.name));
+  if (!taken.has(desired)) return desired;
+  for (let n = 2; n < 100; n++) {
+    const candidate = `${desired}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  throw new Error(`Could not find a free name starting from "${desired}"`);
+}
+
+/** Append .brainifai/ to the project's .gitignore if not already present. */
 function ensureGitignore(projectPath: string): void {
   const gitignorePath = resolve(projectPath, '.gitignore');
   const entry = '.brainifai/';
 
   if (existsSync(gitignorePath)) {
     const content = readFileSync(gitignorePath, 'utf-8');
-    if (content.split('\n').some(line => line.trim() === entry)) {
-      return; // already present
+    if (content.split('\n').some((line) => line.trim() === entry)) {
+      return;
     }
     const separator = content.endsWith('\n') ? '' : '\n';
     appendFileSync(gitignorePath, `${separator}${entry}\n`);

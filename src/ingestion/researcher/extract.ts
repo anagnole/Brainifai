@@ -5,7 +5,7 @@
  * for entity/event/relationship extraction, and returns structured ExtractionResult.
  */
 
-import { ClaudeCliProvider } from '@anagnole/claude-cli-wrapper';
+import { complete, extractJsonOr } from '../../graph-engine/llm.js';
 import { logger } from '../../shared/logger.js';
 import type { NormalizedMessage } from '../../shared/types.js';
 
@@ -45,19 +45,6 @@ export const EXTRACTION_BATCH_SIZE = 20;
 
 export function fallbackExtraction(): ExtractionResult {
   return { entities: [], events: [], relationships: [], trends: [] };
-}
-
-// ─── Provider singleton ─────────────────────────────────────────────────────
-
-let provider: ClaudeCliProvider | null = null;
-
-function getProvider(): ClaudeCliProvider {
-  if (!provider) {
-    // Strip ANTHROPIC_API_KEY so Claude CLI uses the subscription, not the API
-    delete process.env.ANTHROPIC_API_KEY;
-    provider = new ClaudeCliProvider({ defaultModel: 'claude-haiku-4-5-20251001' });
-  }
-  return provider;
 }
 
 // ─── Main extraction ─────────────────────────────────────────────────────────
@@ -111,28 +98,8 @@ export async function extractFromBatch(
   const prompt = buildPrompt(snippets, domain);
 
   try {
-    const cli = getProvider();
-    const response = await cli.complete({
-      model: 'claude-haiku-4-5-20251001',
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 4096,
-      max_turns: 1,
-    });
-
-    const text = response.content
-      .filter((b) => b.type === 'text' && b.text)
-      .map((b) => b.text!)
-      .join('\n');
-
-    // Parse JSON from the response (handle optional markdown fencing)
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      logger.warn('Extraction response did not contain valid JSON');
-      return fallbackExtraction();
-    }
-
-    const parsed = JSON.parse(jsonMatch[0]) as Partial<ExtractionResult>;
-
+    const text = await complete(prompt, { maxTokens: 4096 });
+    const parsed = extractJsonOr<Partial<ExtractionResult>>(text, {});
     return {
       entities: Array.isArray(parsed.entities) ? parsed.entities : [],
       events: Array.isArray(parsed.events) ? parsed.events : [],

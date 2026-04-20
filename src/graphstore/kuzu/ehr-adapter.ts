@@ -454,10 +454,15 @@ export class EhrGraphStore {
     const filters: string[] = [];
     const params: Record<string, KuzuValue> = {};
 
+    // Case-insensitive condition/medication matching — the question generator
+    // uses .toLowerCase().includes(...), and Synthea descriptions mix case
+    // (e.g. "Diabetes mellitus type 2" vs "Disorder of kidney due to diabetes
+    // mellitus"). Without LOWER on both sides, a search for "Diabetes" misses
+    // the second one, under-counting cohorts by ~50%.
     if (opts.conditions && opts.conditions.length > 0) {
       for (let i = 0; i < opts.conditions.length; i++) {
         matchClauses.push(`MATCH (p)-[:DIAGNOSED_WITH]->(c${i}:ConceptCondition)`);
-        filters.push(`c${i}.description CONTAINS $cond${i}`);
+        filters.push(`LOWER(c${i}.description) CONTAINS LOWER($cond${i})`);
         params[`cond${i}`] = opts.conditions[i];
       }
     }
@@ -465,7 +470,7 @@ export class EhrGraphStore {
     if (opts.medications && opts.medications.length > 0) {
       for (let i = 0; i < opts.medications.length; i++) {
         matchClauses.push(`MATCH (p)-[:PRESCRIBED]->(m${i}:ConceptMedication)`);
-        filters.push(`m${i}.description CONTAINS $med${i}`);
+        filters.push(`LOWER(m${i}.description) CONTAINS LOWER($med${i})`);
         params[`med${i}`] = opts.medications[i];
       }
     }
@@ -517,6 +522,74 @@ export class EhrGraphStore {
     return results;
   }
 
+  // ─── Cohort Count (efficient count-only for cohort counting questions) ───
+
+  /**
+   * Count distinct patients matching the given cohort criteria without
+   * returning patient records. Use for "how many patients have X" questions —
+   * find_cohort caps at 100 records AND returns a heavy payload, which is
+   * wrong for counting and blows context on large tiers. This method runs a
+   * single count query and returns the exact number.
+   */
+  async countCohort(opts: {
+    conditions?: string[];
+    medications?: string[];
+    ageRange?: [number, number];
+    gender?: string;
+  }): Promise<number> {
+    const matchClauses: string[] = ['MATCH (p:Patient)'];
+    const filters: string[] = [];
+    const params: Record<string, KuzuValue> = {};
+
+    if (opts.conditions && opts.conditions.length > 0) {
+      for (let i = 0; i < opts.conditions.length; i++) {
+        matchClauses.push(`MATCH (p)-[:DIAGNOSED_WITH]->(c${i}:ConceptCondition)`);
+        filters.push(`LOWER(c${i}.description) CONTAINS LOWER($cond${i})`);
+        params[`cond${i}`] = opts.conditions[i];
+      }
+    }
+
+    if (opts.medications && opts.medications.length > 0) {
+      for (let i = 0; i < opts.medications.length; i++) {
+        matchClauses.push(`MATCH (p)-[:PRESCRIBED]->(m${i}:ConceptMedication)`);
+        filters.push(`LOWER(m${i}.description) CONTAINS LOWER($med${i})`);
+        params[`med${i}`] = opts.medications[i];
+      }
+    }
+
+    if (opts.gender) {
+      filters.push('p.gender = $gender');
+      params.gender = opts.gender;
+    }
+
+    const whereClause = filters.length > 0 ? 'WHERE ' + filters.join(' AND ') : '';
+
+    // Note: age filter is applied post-query because birth_date is a string
+    // column and we need JS date math to compute age at "now".
+    const rows = await this.query(
+      `${matchClauses.join('\n')}
+       ${whereClause}
+       RETURN DISTINCT p.patient_id AS patient_id, p.birth_date AS birth_date`,
+      params,
+    );
+
+    let results = rows.map((r) => ({
+      patient_id: r.patient_id as string,
+      birth_date: r.birth_date as string,
+    }));
+
+    if (opts.ageRange) {
+      const now = new Date();
+      results = results.filter((p) => {
+        const birth = new Date(p.birth_date);
+        const age = (now.getTime() - birth.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+        return age >= opts.ageRange![0] && age <= opts.ageRange![1];
+      });
+    }
+
+    return results.length;
+  }
+
   // ─── Patient Search (FTS) ─────────────────────────────────────────────────
 
   async searchPatients(queryText: string, limit = 20): Promise<PatientRecord[]> {
@@ -547,5 +620,166 @@ export class EhrGraphStore {
       state: r.state as string,
       zip: r.zip as string,
     }));
+  }
+
+  // ─── Observation Concept Search (FTS) ─────────────────────────────────────
+
+  /**
+   * Search for ConceptObservation nodes by clinical name. Returns LOINC code,
+   * official description, units, and FTS relevance score. Use this to bridge
+   * clinical shorthand ("Total Cholesterol") to LOINC's verbose descriptions
+   * ("Cholesterol [Mass/volume] in Serum or Plasma") which the data uses.
+   */
+  async findObservationConcepts(
+    queryText: string,
+    limit = 10,
+  ): Promise<Array<{ code: string; description: string; units: string; score: number }>> {
+    const safeQuery = queryText.replace(/'/g, "''");
+    const rows = await this.query(
+      `CALL QUERY_FTS_INDEX('ConceptObservation', 'observation_fts', '${safeQuery}')
+       RETURN node.code AS code, node.description AS description, node.units AS units, score
+       ORDER BY score DESC LIMIT ${limit}`,
+    );
+    return rows.map((r) => ({
+      code: r.code as string,
+      description: r.description as string,
+      units: (r.units as string) ?? '',
+      score: Number(r.score ?? 0),
+    }));
+  }
+
+  // ─── Cohort Aggregation (server-side) ─────────────────────────────────────
+
+  /**
+   * Compute an aggregate (avg/min/max/sum/count/median) of the most-recent
+   * observation value across a cohort of patients matching a condition. This
+   * exists so the LLM agent can answer cohort questions like "average X for
+   * patients with Y" in a single tool call instead of looping get_labs per
+   * patient (which blows the context window).
+   */
+  async aggregateObservationForCohort(opts: {
+    condition: string;
+    observationCode?: string;
+    observationDescription?: string;
+    aggregation: 'avg' | 'min' | 'max' | 'sum' | 'count' | 'median';
+  }): Promise<{
+    cohort_size: number;
+    patients_with_observation: number;
+    aggregation: string;
+    value: number | null;
+    units: string | null;
+    observation_description: string | null;
+    note?: string;
+  }> {
+    const { condition, observationCode, observationDescription, aggregation } = opts;
+
+    if (!observationCode && !observationDescription) {
+      throw new Error("Either observationCode or observationDescription is required");
+    }
+
+    // Cohort size: distinct patients matching the condition (case-insensitive
+    // to match question generator semantics — Synthea mixes "Diabetes"
+    // and "diabetes" across related descriptions).
+    const cohortRows = await this.query(
+      `MATCH (p:Patient)-[:DIAGNOSED_WITH]->(c:ConceptCondition)
+       WHERE LOWER(c.description) CONTAINS LOWER($cond)
+       RETURN count(DISTINCT p) AS cnt`,
+      { cond: condition },
+    );
+    const cohortSize = Number(cohortRows[0]?.cnt ?? 0);
+
+    if (cohortSize === 0) {
+      return {
+        cohort_size: 0,
+        patients_with_observation: 0,
+        aggregation,
+        value: null,
+        units: null,
+        observation_description: null,
+        note: `No patients found matching condition '${condition}'`,
+      };
+    }
+
+    // Pull all (patient, value, date) tuples for cohort+observation, find latest per patient in JS.
+    // Avoids fighting Kuzu's CAST/aggregation semantics on string-typed FHIR values.
+    const obsParam = observationCode ?? observationDescription!;
+    const obsFilter = observationCode ? 'o.code = $obs' : 'LOWER(o.description) CONTAINS LOWER($obs)';
+    const rows = await this.query(
+      `MATCH (p:Patient)-[:DIAGNOSED_WITH]->(c:ConceptCondition)
+       WHERE LOWER(c.description) CONTAINS LOWER($cond)
+       MATCH (p)-[r:HAS_RESULT]->(o:ConceptObservation)
+       WHERE ${obsFilter}
+       RETURN p.patient_id AS pid, r.value AS value, r.units AS units, r.date AS date, o.description AS description`,
+      { cond: condition, obs: obsParam },
+    );
+
+    interface Latest { value: number; units: string; desc: string; date: string }
+    const latestByPatient = new Map<string, Latest>();
+    for (const row of rows) {
+      const pid = row.pid as string;
+      const raw = row.value;
+      const value = typeof raw === 'number' ? raw : parseFloat(String(raw ?? ''));
+      if (!Number.isFinite(value)) continue;
+      const date = String(row.date ?? '');
+      const existing = latestByPatient.get(pid);
+      if (!existing || date > existing.date) {
+        latestByPatient.set(pid, {
+          value,
+          units: String(row.units ?? ''),
+          desc: String(row.description ?? ''),
+          date,
+        });
+      }
+    }
+
+    const values = Array.from(latestByPatient.values()).map((v) => v.value);
+    if (values.length === 0) {
+      return {
+        cohort_size: cohortSize,
+        patients_with_observation: 0,
+        aggregation,
+        value: null,
+        units: null,
+        observation_description: observationDescription ?? observationCode ?? null,
+        note: 'No numeric observations found for the cohort',
+      };
+    }
+
+    let result: number;
+    switch (aggregation) {
+      case 'avg':
+        result = values.reduce((a, b) => a + b, 0) / values.length;
+        break;
+      case 'min':
+        result = Math.min(...values);
+        break;
+      case 'max':
+        result = Math.max(...values);
+        break;
+      case 'sum':
+        result = values.reduce((a, b) => a + b, 0);
+        break;
+      case 'count':
+        result = values.length;
+        break;
+      case 'median': {
+        const sorted = [...values].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        result = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+        break;
+      }
+      default:
+        result = NaN;
+    }
+
+    const sample = latestByPatient.values().next().value as Latest;
+    return {
+      cohort_size: cohortSize,
+      patients_with_observation: latestByPatient.size,
+      aggregation,
+      value: Math.round(result * 100) / 100,
+      units: sample.units || null,
+      observation_description: sample.desc || null,
+    };
   }
 }

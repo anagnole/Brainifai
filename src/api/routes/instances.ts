@@ -1,8 +1,9 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
 import { listInstances } from '../../instance/registry.js';
-import { readInstanceConfig, writeInstanceConfig } from '../../instance/resolve.js';
+import { readFolderConfigAt } from '../../instance/resolve.js';
+import { findInstance, updateInstance, writeFolderConfig } from '../../instance/folder-config.js';
 
 export const instancesRoute: FastifyPluginAsync = async (app) => {
   app.get('/instances', async (_req, reply) => {
@@ -10,34 +11,28 @@ export const instancesRoute: FastifyPluginAsync = async (app) => {
       const entries = await listInstances({ status: 'active' });
 
       const instances = entries.map((entry) => {
-        let config;
-        try {
-          config = readInstanceConfig(entry.path);
-        } catch {
-          // Config file may not exist — return registry data only
-        }
+        // v2: entry.path = <folder>/.brainifai/<name>/; FolderConfig is one level up.
+        const folderCfg = readFolderConfigAt(dirname(entry.path));
+        const inst = folderCfg ? findInstance(folderCfg, entry.name) : null;
 
-        // Try to get DB file size
         let dbSizeBytes: number | null = null;
         try {
           const kuzuPath = resolve(entry.path, 'data', 'kuzu');
           const stat = statSync(kuzuPath);
           dbSizeBytes = stat.size;
-        } catch {
-          // DB directory may not exist yet
-        }
+        } catch { /* DB directory may not exist yet */ }
 
         return {
           name: entry.name,
           type: entry.type,
-          description: config?.description ?? entry.description,
+          description: inst?.description ?? entry.description,
           path: entry.path,
           status: entry.status,
-          recentActivities: config?.recentActivities ?? [],
-          contextFunctions: config?.contextFunctions ?? [],
-          sources: config?.sources ?? [],
-          createdAt: config?.createdAt ?? entry.createdAt,
-          updatedAt: config?.updatedAt ?? entry.updatedAt,
+          recentActivities: inst?.recentActivities ?? [],
+          contextFunctions: inst?.contextFunctions ?? [],
+          sources: inst?.sources ?? [],
+          createdAt: inst?.createdAt ?? entry.createdAt,
+          updatedAt: inst?.updatedAt ?? entry.updatedAt,
           dbSizeBytes,
         };
       });
@@ -70,10 +65,22 @@ export const instancesRoute: FastifyPluginAsync = async (app) => {
         return reply.status(404).send({ error: `Instance "${name}" not found` });
       }
 
-      const config = readInstanceConfig(entry.path);
-      config.description = description;
-      config.updatedAt = new Date().toISOString();
-      writeInstanceConfig(entry.path, config);
+      const folderPath = dirname(entry.path);
+      const folderCfg = readFolderConfigAt(folderPath);
+      if (!folderCfg) {
+        return reply.status(500).send({ error: `No FolderConfig at ${folderPath}` });
+      }
+      const inst = findInstance(folderCfg, name);
+      if (!inst) {
+        return reply.status(404).send({ error: `Instance "${name}" not listed in FolderConfig` });
+      }
+
+      const updated = {
+        ...inst,
+        description,
+        updatedAt: new Date().toISOString(),
+      };
+      writeFolderConfig(folderPath, updateInstance(folderCfg, name, updated));
 
       return { ok: true, name, description };
     } catch (err) {

@@ -1,11 +1,13 @@
 // ─── Description Auto-Refinement ─────────────────────────────────────────────
+// Periodically updates an instance's description to reflect what it actually
+// contains. Uses the shared graph-engine LLM provider (Claude Haiku).
 
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import type { GraphStore } from '../graphstore/types.js';
+import { complete } from '../graph-engine/llm.js';
 import { logger } from '../shared/logger.js';
 
-const execFileAsync = promisify(execFile);
+const MAX_DESCRIPTION_CHARS = 200;
+const CLI_TIMEOUT_MS = 30_000;
 
 export interface RefinementInput {
   currentDescription: string;
@@ -23,16 +25,15 @@ export interface RefinementInput {
 export async function gatherRefinementContext(
   store: GraphStore,
 ): Promise<Omit<RefinementInput, 'currentDescription' | 'instanceName' | 'instanceType'>> {
-  // Get top topics by searching broadly
   const topicResults = await store.search({ query: '*', types: ['Topic'], limit: 20 });
   const recentTopics = topicResults.map((r) => r.name);
 
-  // Get source distribution from recent activities
-  const recentActivities = await store.getRecentActivity({ since: new Date(Date.now() - 30 * 86400 * 1000).toISOString(), limit: 50 });
+  const recentActivities = await store.getRecentActivity({
+    since: new Date(Date.now() - 30 * 86400 * 1000).toISOString(),
+    limit: 50,
+  });
   const sourceSet = new Set<string>();
-  for (const a of recentActivities) {
-    sourceSet.add(a.source);
-  }
+  for (const a of recentActivities) sourceSet.add(a.source);
 
   return {
     recentTopics,
@@ -44,12 +45,29 @@ export async function gatherRefinementContext(
 
 /**
  * Generate a refined description based on what the instance actually contains.
- * Spawns the Claude CLI process (uses `claude` command with --print for non-interactive).
  */
-export async function generateRefinedDescription(
-  input: RefinementInput,
-): Promise<string> {
-  const prompt = `You are refining a Brainifai instance description. The description is used by an orchestrator to route data to the correct instance, so it must be specific and accurate.
+export async function generateRefinedDescription(input: RefinementInput): Promise<string> {
+  const prompt = buildPrompt(input);
+
+  try {
+    const text = await complete(prompt, { maxTokens: 256, timeoutMs: CLI_TIMEOUT_MS });
+    if (!text) throw new Error('Empty response from Claude CLI');
+
+    const cleaned = text
+      .replace(/^["`'\s]+|["`'\s]+$/g, '')
+      .trim()
+      .slice(0, MAX_DESCRIPTION_CHARS);
+
+    logger.info({ instance: input.instanceName, description: cleaned }, 'Generated refined description');
+    return cleaned;
+  } catch (err) {
+    logger.error({ err, instance: input.instanceName }, 'Refinement failed');
+    throw new Error(`Refinement failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function buildPrompt(input: RefinementInput): string {
+  return `You are refining a Brainifai instance description. The description is used by an orchestrator to route data to the correct instance, so it must be specific and accurate.
 
 Current instance:
 - Name: ${input.instanceName}
@@ -62,31 +80,7 @@ Data summary:
 - Entity count: ${input.entityCount}
 - Activity count: ${input.activityCount}
 
-Write a refined 1-2 sentence description (max 200 chars) that captures what this instance actually contains based on the data. Keep it specific enough for routing. If the current description is already accurate, return it unchanged.
+Write a refined 1-2 sentence description (max ${MAX_DESCRIPTION_CHARS} chars) that captures what this instance actually contains based on the data. Keep it specific enough for routing. If the current description is already accurate, return it unchanged.
 
 Return ONLY the description text, nothing else.`;
-
-  try {
-    const { stdout } = await execFileAsync('claude', [
-      '--print',
-      '--model', 'haiku',
-      prompt,
-    ], {
-      timeout: 30_000,
-      env: { ...process.env },
-    });
-
-    const text = stdout.trim();
-    if (!text) {
-      throw new Error('Empty response from Claude CLI');
-    }
-
-    // Enforce max length
-    const description = text.slice(0, 200);
-    logger.info({ instance: input.instanceName, description }, 'Generated refined description');
-    return description;
-  } catch (err) {
-    logger.error({ err, instance: input.instanceName }, 'Claude CLI refinement failed');
-    throw new Error(`Claude CLI refinement failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
 }

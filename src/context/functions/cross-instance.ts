@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ContextFunction } from '../types.js';
 import { queryParent } from '../tree-query.js';
-import { resolveInstancePath, readInstanceConfig } from '../../instance/resolve.js';
+import { resolveInstance } from '../../instance/resolve.js';
 import { logger } from '../../shared/logger.js';
 
 export const broaderContextFn: ContextFunction = {
@@ -18,12 +18,14 @@ export const broaderContextFn: ContextFunction = {
     // Resolve current instance
     let instanceName: string;
     let instancePath: string;
+    let parent: string | null;
     try {
-      instancePath = resolveInstancePath();
-      const config = readInstanceConfig(instancePath);
-      instanceName = config.name;
+      const resolved = resolveInstance();
+      instanceName = resolved.config.name;
+      instancePath = resolved.instancePath;
+      parent = resolved.config.parent;
 
-      if (!config.parent) {
+      if (!parent) {
         return { error: 'This is the root instance — no parent to query' };
       }
     } catch {

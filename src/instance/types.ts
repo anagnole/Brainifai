@@ -48,3 +48,21 @@ export interface InstanceRegistryEntry {
   createdAt: string;
   updatedAt: string;
 }
+
+// ─── Folder config (v2 layout) ──────────────────────────────────────────────
+// A single .brainifai/config.json file hosts a FolderConfig that wraps one or
+// more InstanceConfig entries. Each instance has its own subdirectory within
+// the .brainifai/ folder holding its Kuzu DB at <instance-name>/data/kuzu/.
+
+export interface FolderConfig {
+  version: 1;
+  instances: InstanceConfig[];
+}
+
+/** Runtime info for an instance resolved from a FolderConfig. */
+export interface ResolvedInstance {
+  config: InstanceConfig;
+  folderPath: string;           // absolute path to .brainifai/
+  instancePath: string;         // absolute path to .brainifai/<name>/
+  dbPath: string;               // absolute path to .brainifai/<name>/data/kuzu/
+}

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { findProjectInstance, readInstanceConfig, writeInstanceConfig, globalInstanceExists, GLOBAL_BRAINIFAI_PATH } from '../../instance/resolve.js';
+import { resolveInstance, readFolderConfigAt } from '../../instance/resolve.js';
+import { writeFolderConfig, updateInstance } from '../../instance/folder-config.js';
 import { logger } from '../../shared/logger.js';
 
 export function registerUpdateDescription(server: McpServer) {
@@ -12,30 +13,33 @@ export function registerUpdateDescription(server: McpServer) {
         .describe('The refined instance description — required unless auto_refine is true'),
       auto_refine: z.boolean().default(false)
         .describe('When true, uses AI to generate a description from the instance graph data'),
+      instance_name: z.string().optional()
+        .describe('Required if the folder hosts multiple instances'),
     },
-    async ({ description, auto_refine }) => {
-      // Find the nearest instance (project first, then global)
-      const projectPath = findProjectInstance();
-      const instancePath = projectPath ?? (globalInstanceExists() ? GLOBAL_BRAINIFAI_PATH : null);
-
-      if (!instancePath) {
+    async ({ description, auto_refine, instance_name }) => {
+      let resolved;
+      try {
+        resolved = resolveInstance(undefined, instance_name);
+      } catch (err) {
         return {
-          content: [{
-            type: 'text' as const,
-            text: 'No Brainifai instance found. Run `brainifai init` first.',
-          }],
+          content: [{ type: 'text' as const, text: (err as Error).message }],
           isError: true,
         };
       }
 
-      const config = readInstanceConfig(instancePath);
-      const previousDescription = config.description;
+      const folderCfg = readFolderConfigAt(resolved.folderPath);
+      if (!folderCfg) {
+        return {
+          content: [{ type: 'text' as const, text: `No FolderConfig at ${resolved.folderPath}` }],
+          isError: true,
+        };
+      }
 
+      const previousDescription = resolved.config.description;
       let newDescription: string;
 
       if (auto_refine) {
-        // Rate-limit: skip if refined less than 24 hours ago
-        const lastUpdated = new Date(config.updatedAt).getTime();
+        const lastUpdated = new Date(resolved.config.updatedAt).getTime();
         const hoursSinceUpdate = (Date.now() - lastUpdated) / (1000 * 60 * 60);
         if (hoursSinceUpdate < 24 && !description) {
           return {
@@ -55,11 +59,11 @@ export function registerUpdateDescription(server: McpServer) {
           newDescription = await generateRefinedDescription({
             ...context,
             currentDescription: previousDescription,
-            instanceName: config.name,
-            instanceType: config.type,
+            instanceName: resolved.config.name,
+            instanceType: resolved.config.type,
           });
         } catch (err) {
-          logger.warn({ err, instance: config.name }, 'Auto-refinement failed, keeping existing description');
+          logger.warn({ err, instance: resolved.config.name }, 'Auto-refinement failed');
           return {
             content: [{
               type: 'text' as const,
@@ -71,37 +75,38 @@ export function registerUpdateDescription(server: McpServer) {
       } else {
         if (!description) {
           return {
-            content: [{
-              type: 'text' as const,
-              text: 'Either provide a description or set auto_refine=true.',
-            }],
+            content: [{ type: 'text' as const, text: 'Either provide a description or set auto_refine=true.' }],
             isError: true,
           };
         }
         newDescription = description;
       }
 
-      config.description = newDescription;
-      config.updatedAt = new Date().toISOString();
-      writeInstanceConfig(instancePath, config);
+      const updated = {
+        ...resolved.config,
+        description: newDescription,
+        updatedAt: new Date().toISOString(),
+      };
+      writeFolderConfig(
+        resolved.folderPath,
+        updateInstance(folderCfg, resolved.config.name, updated),
+      );
 
-      logger.info({ instance: config.name, instancePath }, 'Instance description updated');
+      logger.info({ instance: resolved.config.name, folderPath: resolved.folderPath }, 'Instance description updated');
 
-      // Sync to global registry if this is a child instance
-      if (config.parent) {
+      if (resolved.config.parent) {
         try {
           const { syncDescription } = await import('../../instance/registry.js');
-          await syncDescription(config.name, newDescription);
-          logger.info({ instance: config.name }, 'Description synced to global registry');
+          await syncDescription(resolved.config.name, newDescription);
         } catch (err) {
-          logger.warn({ err, instance: config.name }, 'Failed to sync description to global registry');
+          logger.warn({ err }, 'Failed to sync description to global registry');
         }
       }
 
       return {
         content: [{
           type: 'text' as const,
-          text: `Updated description for "${config.name}" instance.\nPrevious: ${previousDescription}\nNew: ${newDescription}${auto_refine ? '\n(auto-refined from graph data)' : ''}`,
+          text: `Updated description for "${resolved.config.name}" instance.\nPrevious: ${previousDescription}\nNew: ${newDescription}${auto_refine ? '\n(auto-refined from graph data)' : ''}`,
         }],
       };
     },

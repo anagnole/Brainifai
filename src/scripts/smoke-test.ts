@@ -184,15 +184,42 @@ async function phase1(store: any) {
   const { PERSONS, CONTAINERS, TOPICS, SOURCE_ACCOUNTS, ACTIVITIES,
     FROM_EDGES, IN_EDGES, MENTIONS_EDGES, IDENTIFIES_EDGES, OWNS_EDGES,
   } = await import('../graphstore/__tests__/fixtures.js');
+  type GraphEdge = typeof FROM_EDGES[number];
+
+  // Extra activities for decision_log testing (Phase 8)
+  const decisionActivities = [
+    {
+      source: 'claude-code', source_id: 'cc:decision:1',
+      timestamp: new Date(Date.now() - 2 * 3600000).toISOString(),
+      kind: 'decision', snippet: 'Lowered FTS min-score from 0.3 to 0.05 for Kuzu compatibility',
+      url: null, thread_ts: null,
+    },
+    {
+      source: 'claude-code', source_id: 'cc:insight:1',
+      timestamp: new Date(Date.now() - 1 * 3600000).toISOString(),
+      kind: 'insight', snippet: 'brainifai-ui branch was dead Neo4j code, deleted it',
+      url: null, thread_ts: null,
+    },
+  ];
+
+  // Extra edges: decision activities need FROM_PERSON + IN_CONTAINER to be queryable
+  const decisionFromEdges: GraphEdge[] = [
+    { type: 'FROM', fromLabel: 'Activity', toLabel: 'Person', from: { source: 'claude-code', source_id: 'cc:decision:1' }, to: { person_key: 'test:alice' } },
+    { type: 'FROM', fromLabel: 'Activity', toLabel: 'Person', from: { source: 'claude-code', source_id: 'cc:insight:1' }, to: { person_key: 'test:alice' } },
+  ];
+  const decisionInEdges: GraphEdge[] = [
+    { type: 'IN', fromLabel: 'Activity', toLabel: 'Container', from: { source: 'claude-code', source_id: 'cc:decision:1' }, to: { source: 'test', container_id: 'general' } },
+    { type: 'IN', fromLabel: 'Activity', toLabel: 'Container', from: { source: 'claude-code', source_id: 'cc:insight:1' }, to: { source: 'test', container_id: 'general' } },
+  ];
 
   // Seed data
   await store.upsertNodes('Person', PERSONS, ['person_key']);
   await store.upsertNodes('Container', CONTAINERS, ['source', 'container_id']);
   await store.upsertNodes('Topic', TOPICS, ['name']);
   await store.upsertNodes('SourceAccount', SOURCE_ACCOUNTS, ['source', 'account_id']);
-  await store.upsertNodes('Activity', ACTIVITIES, ['source', 'source_id']);
-  await store.upsertEdges('FROM', FROM_EDGES);
-  await store.upsertEdges('IN', IN_EDGES);
+  await store.upsertNodes('Activity', [...ACTIVITIES, ...decisionActivities], ['source', 'source_id']);
+  await store.upsertEdges('FROM', [...FROM_EDGES, ...decisionFromEdges]);
+  await store.upsertEdges('IN', [...IN_EDGES, ...decisionInEdges]);
   await store.upsertEdges('MENTIONS', MENTIONS_EDGES);
   await store.upsertEdges('IDENTIFIES', IDENTIFIES_EDGES);
   await store.upsertEdges('OWNS', OWNS_EDGES);
@@ -237,8 +264,8 @@ async function phase1(store: any) {
   // Test: recent activity
   try {
     const recent = await store.getRecentActivity({ limit: 50 });
-    check(recent.length === 5, P, 'recent activity returns 5 items',
-      `Expected 5, got ${recent.length}`);
+    check(recent.length === 7, P, 'recent activity returns 7 items',
+      `Expected 7, got ${recent.length}`);
   } catch (e: any) { fail(P, 'recent activity returns 5 items', e.message); }
 }
 
@@ -488,6 +515,229 @@ async function phase6() {
   } catch (e: any) { fail(P, 'brainifai list exits 0', e.message); }
 }
 
+// ── Phase 7: Project Manager Instance ────────────────────────────────────────
+
+async function phase7() {
+  const P = 'Project Manager';
+  console.log(`\n${BOLD}Phase 7: ${P}${RESET}`);
+
+  const pmDbPath = join(TEMP_DIR, 'pm-kuzu');
+
+  // Initialize PM schema
+  const { initializeInstanceDb } = await import('../instance/db.js');
+  await initializeInstanceDb(pmDbPath, 'project-manager');
+
+  const { ProjectManagerGraphStore } = await import('../graphstore/kuzu/project-manager-adapter.js');
+  const store = new ProjectManagerGraphStore({ dbPath: pmDbPath, readOnly: false });
+  try { await store.initialize(); } catch { /* schema already created */ }
+
+  // Seed PM fixture data
+  const now = new Date();
+  const day = 86400000;
+
+  await store.query(`MERGE (p:Project {slug: 'brainifai'})
+    SET p.name = 'brainifai', p.path = '/Projects/Brainifai', p.language = 'TypeScript',
+    p.framework = 'React', p.description = 'Personal Knowledge Graph', p.health_score = 'excellent',
+    p.last_activity = '${now.toISOString()}', p.created_at = '${new Date(now.getTime() - 30 * day).toISOString()}',
+    p.updated_at = '${now.toISOString()}'`);
+
+  await store.query(`MERGE (p:Project {slug: 'flaio-cli'})
+    SET p.name = 'flaio-cli', p.path = '/Projects/flaio-cli', p.language = 'TypeScript',
+    p.framework = 'React', p.description = 'CLI tool for Flaio', p.health_score = 'good',
+    p.last_activity = '${new Date(now.getTime() - 5 * day).toISOString()}',
+    p.created_at = '${new Date(now.getTime() - 60 * day).toISOString()}',
+    p.updated_at = '${new Date(now.getTime() - 5 * day).toISOString()}'`);
+
+  await store.query(`MERGE (p:Project {slug: 'stale-project'})
+    SET p.name = 'stale-project', p.path = '/Projects/stale', p.language = 'Python',
+    p.framework = 'Flask', p.description = 'Old abandoned project', p.health_score = 'poor',
+    p.last_activity = '${new Date(now.getTime() - 90 * day).toISOString()}',
+    p.created_at = '${new Date(now.getTime() - 180 * day).toISOString()}',
+    p.updated_at = '${new Date(now.getTime() - 90 * day).toISOString()}'`);
+
+  // Commits
+  await store.query(`MERGE (c:Commit {sha: 'abc1234'})
+    SET c.message = 'feat: add smoke test', c.author = 'Leonidas', c.date = '${new Date(now.getTime() - 1 * day).toISOString().split('T')[0]}',
+    c.files_changed_count = 14, c.insertions = 1837, c.deletions = 144`);
+  await store.query(`MERGE (c:Commit {sha: 'def5678'})
+    SET c.message = 'fix: FTS min-score threshold', c.author = 'Leonidas', c.date = '${new Date(now.getTime() - 2 * day).toISOString().split('T')[0]}',
+    c.files_changed_count = 1, c.insertions = 1, c.deletions = 1`);
+  await store.query(`MATCH (c:Commit {sha: 'abc1234'}), (p:Project {slug: 'brainifai'}) MERGE (c)-[:COMMITTED_TO]->(p)`);
+  await store.query(`MATCH (c:Commit {sha: 'def5678'}), (p:Project {slug: 'brainifai'}) MERGE (c)-[:COMMITTED_TO]->(p)`);
+
+  // Branches
+  await store.query(`MERGE (b:Branch {branch_key: 'brainifai:main'})
+    SET b.project_slug = 'brainifai', b.name = 'main', b.is_default = true,
+    b.last_commit_date = '${now.toISOString().split('T')[0]}', b.ahead = 0, b.behind = 0`);
+  await store.query(`MATCH (b:Branch {branch_key: 'brainifai:main'}), (p:Project {slug: 'brainifai'}) MERGE (b)-[:BELONGS_TO]->(p)`);
+
+  // Dependencies
+  await store.query(`MERGE (d:Dependency {dep_key: 'npm:typescript'})
+    SET d.ecosystem = 'npm', d.name = 'typescript', d.latest_version = '5.8.0', d.is_outdated = false`);
+  await store.query(`MATCH (p:Project {slug: 'brainifai'}), (d:Dependency {dep_key: 'npm:typescript'}) MERGE (p)-[:USES {version: '5.7.0', is_dev: true}]->(d)`);
+  await store.query(`MATCH (p:Project {slug: 'flaio-cli'}), (d:Dependency {dep_key: 'npm:typescript'}) MERGE (p)-[:USES {version: '5.6.0', is_dev: true}]->(d)`);
+
+  // Cross-project relationships (both directions so getCrossProjectImpact finds them)
+  await store.query(`MATCH (a:Project {slug: 'brainifai'}), (b:Project {slug: 'flaio-cli'})
+    MERGE (a)-[:RELATED_TO {relation_type: 'downstream', confidence: 'high'}]->(b)`);
+  await store.query(`MATCH (a:Project {slug: 'flaio-cli'}), (b:Project {slug: 'brainifai'})
+    MERGE (a)-[:RELATED_TO {relation_type: 'upstream', confidence: 'high'}]->(b)`);
+
+  // Claude session
+  await store.query(`MERGE (s:ClaudeSession {session_id: 'test-session-1'})
+    SET s.date = '${now.toISOString().split('T')[0]}', s.summary = 'Built smoke test and redesigned UI',
+    s.files_touched_count = 14, s.model = 'opus', s.duration_minutes = 120`);
+  await store.query(`MATCH (s:ClaudeSession {session_id: 'test-session-1'}), (p:Project {slug: 'brainifai'})
+    MERGE (s)-[:WORKED_ON]->(p)`);
+
+  // Rebuild FTS after all data is inserted
+  await store.rebuildFtsIndexes();
+
+  // ── Test PM GraphStore methods ──
+
+  // searchProjects
+  try {
+    const results = await store.searchProjects('brainifai');
+    check(results.length > 0 && results[0].slug === 'brainifai', P, 'searchProjects finds brainifai',
+      `Expected brainifai, got ${results.map((r: any) => r.slug)}`);
+  } catch (e: any) { fail(P, 'searchProjects finds brainifai', e.message); }
+
+  // getProjectHealth
+  try {
+    const health = await store.getProjectHealth('brainifai');
+    check(health != null && health.project.health_score === 'excellent', P, 'getProjectHealth returns excellent',
+      `Expected excellent, got ${health?.project.health_score}`);
+  } catch (e: any) { fail(P, 'getProjectHealth returns excellent', e.message); }
+
+  // getProjectActivity
+  try {
+    const activity = await store.getProjectActivity('brainifai', { windowDays: 30, limit: 10 });
+    check(activity.commits.length >= 2, P, 'getProjectActivity has commits',
+      `Expected >= 2 commits, got ${activity.commits.length}`);
+  } catch (e: any) { fail(P, 'getProjectActivity has commits', e.message); }
+
+  // getCrossProjectImpact
+  try {
+    const impact = await store.getCrossProjectImpact('brainifai', 1);
+    check(impact.affected_projects.length > 0, P, 'getCrossProjectImpact finds related projects',
+      `Expected related projects, got ${impact.affected_projects.length}`);
+  } catch (e: any) { fail(P, 'getCrossProjectImpact finds related projects', e.message); }
+
+  // findStaleProjects
+  try {
+    const stale = await store.findStaleProjects(30);
+    check(stale.some((s: any) => s.project.slug === 'stale-project'), P, 'findStaleProjects finds stale-project',
+      `Expected stale-project in results, got ${stale.map((s: any) => s.project.slug)}`);
+  } catch (e: any) { fail(P, 'findStaleProjects finds stale-project', e.message); }
+
+  // getDependencyGraph
+  try {
+    const deps = await store.getDependencyGraph();
+    check(deps.dependencies.length > 0, P, 'getDependencyGraph returns data',
+      `Expected dependencies, got ${deps.dependencies?.length ?? 'undefined'}`);
+  } catch (e: any) { fail(P, 'getDependencyGraph returns data', e.message); }
+
+  // getClaudeSessionHistory
+  try {
+    const sessions = await store.getClaudeSessionHistory('brainifai', { windowDays: 30, limit: 5 });
+    check(sessions.length > 0 && sessions[0].summary === 'Built smoke test and redesigned UI',
+      P, 'getClaudeSessionHistory returns sessions',
+      `Expected sessions, got ${sessions.length}`);
+  } catch (e: any) { fail(P, 'getClaudeSessionHistory returns sessions', e.message); }
+
+  try { await store.close(); } catch { /* SIGSEGV */ }
+}
+
+// ── Phase 8: Coding Instance Functions ───────────────────────────────────────
+
+async function phase8(store: any) {
+  const P = 'Coding Instance';
+  console.log(`\n${BOLD}Phase 8: ${P}${RESET}`);
+
+  const { createBaseRegistry } = await import('../context/registry.js');
+  const registry = await createBaseRegistry();
+
+  // get_decision_log — should find the decision/insight activities from Phase 1
+  try {
+    const fn = registry.get('get_decision_log')!;
+    check(fn != null, P, 'get_decision_log is registered', 'Function not found in registry');
+    if (fn) {
+      const result = await fn.execute({ window_days: 30, limit: 20 }, store) as any;
+      check(result != null && Array.isArray(result.decisions) && result.decisions.length > 0,
+        P, 'get_decision_log returns decisions',
+        `Expected decisions array with items, got ${JSON.stringify(result)?.slice(0, 200)}`);
+    }
+  } catch (e: any) { fail(P, 'get_decision_log returns entries', e.message); }
+
+  // get_pr_context — should work even if no PR data exists (returns empty)
+  try {
+    const fn = registry.get('get_pr_context')!;
+    check(fn != null, P, 'get_pr_context is registered', 'Function not found in registry');
+    if (fn) {
+      const result = await fn.execute({ query: 'deploy' }, store) as any;
+      check(result != null, P, 'get_pr_context executes without error',
+        `Expected result, got ${JSON.stringify(result)?.slice(0, 200)}`);
+    }
+  } catch (e: any) { fail(P, 'get_pr_context executes without error', e.message); }
+
+  // GitNexus-dependent functions — execute if CLI available, skip if not
+  const { execSync } = await import('node:child_process');
+  let hasGitNexus = false;
+  try {
+    execSync('which gitnexus', { stdio: 'ignore' });
+    hasGitNexus = true;
+  } catch { /* not installed */ }
+
+  if (hasGitNexus) {
+    const gnRepo = 'Brainifai';
+
+    // search_code — queries GitNexus + enriches from KG
+    try {
+      const fn = registry.get('search_code')!;
+      const result = await fn.execute({ query: 'MCP server', repo: gnRepo, limit: 3 }, store) as any;
+      check(result != null && Array.isArray(result.processes), P, 'search_code returns processes',
+        `Expected processes array, got ${JSON.stringify(result)?.slice(0, 200)}`);
+    } catch (e: any) { fail(P, 'search_code returns processes', e.message); }
+
+    // get_symbol_context — 360 view of a symbol
+    try {
+      const fn = registry.get('get_symbol_context')!;
+      const result = await fn.execute({ symbol: 'createServer', repo: gnRepo }, store) as any;
+      check(result != null && result.symbol != null, P, 'get_symbol_context returns symbol info',
+        `Expected symbol info, got ${JSON.stringify(result)?.slice(0, 200)}`);
+    } catch (e: any) { fail(P, 'get_symbol_context returns symbol info', e.message); }
+
+    // get_blast_radius — impact analysis
+    try {
+      const fn = registry.get('get_blast_radius')!;
+      const result = await fn.execute({ target: 'createServer', direction: 'upstream', repo: gnRepo }, store) as any;
+      check(result != null && result.risk != null, P, 'get_blast_radius returns risk assessment',
+        `Expected risk field, got ${JSON.stringify(result)?.slice(0, 200)}`);
+    } catch (e: any) { fail(P, 'get_blast_radius returns risk assessment', e.message); }
+
+    // detect_code_changes — aggregate blast radius for a set of changed symbols
+    try {
+      const fn = registry.get('detect_code_changes')!;
+      const result = await fn.execute({ changes: ['createServer'], repo: gnRepo }, store) as any;
+      check(result != null && Array.isArray(result.changes), P, 'detect_code_changes executes',
+        `Expected changes array, got ${JSON.stringify(result)?.slice(0, 200)}`);
+    } catch (e: any) { fail(P, 'detect_code_changes executes', e.message); }
+  } else {
+    // Just verify registration
+    for (const name of ['search_code', 'get_symbol_context', 'get_blast_radius', 'detect_code_changes']) {
+      const fn = registry.get(name);
+      check(fn != null, P, `${name} is registered (GitNexus not installed, skipping exec)`,
+        'Function not found in registry');
+    }
+  }
+
+  // get_people_context (manager) — verify registered
+  try {
+    const fn = registry.get('get_people_context');
+    check(fn != null, P, 'get_people_context is registered (manager)', 'Function not found in registry');
+  } catch (e: any) { fail(P, 'get_people_context is registered (manager)', e.message); }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -513,6 +763,13 @@ async function main() {
     fail('Context Functions', 'phase completion', e.message);
   }
 
+  // Phase 8 needs the base store (decision_log queries against base schema)
+  try {
+    await withTimeout(phase8(store), 15000, 'Phase 8');
+  } catch (e: any) {
+    fail('Coding Instance', 'phase completion', e.message);
+  }
+
   // Close store before child process phases (print results first as SIGSEGV safety net)
   printResults();
 
@@ -530,6 +787,10 @@ async function main() {
 
   try { await withTimeout(phase6(), 30000, 'Phase 6'); }
   catch (e: any) { fail('CLI', 'phase completion', e.message); }
+
+  // Phase 7: PM instance (separate DB, runs after child process phases)
+  try { await withTimeout(phase7(), 30000, 'Phase 7'); }
+  catch (e: any) { fail('Project Manager', 'phase completion', e.message); }
 
   // Final report
   printResults();

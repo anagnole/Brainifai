@@ -1,7 +1,8 @@
-import { existsSync } from 'fs';
-import { resolve } from 'path';
+import { existsSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
 import { listInstances, unregisterInstance } from './registry.js';
-import { INSTANCE_CONFIG_FILE, readInstanceConfig } from './resolve.js';
+import { readFolderConfigAt } from './resolve.js';
+import { findInstance } from './folder-config.js';
 import type { InstanceRegistryEntry } from './types.js';
 
 export interface HealthCheckResult {
@@ -20,24 +21,23 @@ export async function checkAllInstances(): Promise<HealthCheckResult[]> {
 
 function checkInstance(entry: InstanceRegistryEntry): HealthCheckResult {
   const issues: string[] = [];
-  const configPath = resolve(entry.path, INSTANCE_CONFIG_FILE);
+  // v2: entry.path = <folder>/.brainifai/<name>/; folder config is one level up.
+  const folderPath = dirname(entry.path);
   const dbPath = resolve(entry.path, 'data', 'kuzu');
-
-  const configExists = existsSync(configPath);
   const dbExists = existsSync(dbPath);
+
+  const folderCfg = readFolderConfigAt(folderPath);
+  const configExists = folderCfg !== null;
   let configMatch = false;
 
   if (!configExists) {
-    issues.push(`Config missing at ${configPath} — directory may have been moved or deleted`);
+    issues.push(`FolderConfig missing at ${folderPath} — folder may have been moved or deleted`);
   } else {
-    try {
-      const config = readInstanceConfig(entry.path);
-      configMatch = config.name === entry.name;
-      if (!configMatch) {
-        issues.push(`Config name "${config.name}" doesn't match registry name "${entry.name}"`);
-      }
-    } catch {
-      issues.push('Config file exists but is unreadable/corrupt');
+    const inst = findInstance(folderCfg, entry.name);
+    if (!inst) {
+      issues.push(`Instance "${entry.name}" not listed in ${folderPath}/config.json`);
+    } else {
+      configMatch = true;
     }
   }
 
