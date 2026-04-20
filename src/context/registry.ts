@@ -55,6 +55,14 @@ export async function createBaseRegistry(): Promise<ContextFunctionRegistry> {
   registry.register(contextPacketFn);
   registry.register(ingestMemoryFn);
 
+  // Graph-engine primitives — the new brain-inspired retrieval layer. Active
+  // for instances whose `contextFunctions` list them (general by default).
+  const engineMod = await import('./functions/engine-primitives.js');
+  registry.register(engineMod.workingMemoryFn);
+  registry.register(engineMod.associateFn);
+  registry.register(engineMod.recallEpisodeFn);
+  registry.register(engineMod.consolidateFn);
+
   // Template-specific functions — registered in the global pool,
   // but only activated per-instance via contextFunctions config
   const [
