@@ -228,6 +228,94 @@ export async function updateGlobalSettings(
   });
 }
 
+/* ── Graph-engine endpoints (new Atom/Entity/Episode schema) ── */
+
+export interface EngineOverview {
+  dbPath: string;
+  counts: {
+    atoms: number;
+    entities: number;
+    episodes: number;
+    mentions: number;
+    associations: number;
+  };
+  topEntities: Array<{ id: string; name: string; type: string; mentionCount: number }>;
+  recentAtoms: Array<{ id: string; content: string; kind: string; created_at: string; cwd: string }>;
+}
+
+export interface EngineSeedHit {
+  id: string;
+  name: string;
+  type: string;
+  mentionCount: number;
+  confidence: number;
+}
+
+export interface EngineAtomDetail {
+  atom: Record<string, unknown>;
+  mentions: Array<{ id: string; name: string; type: string; prominence: number }>;
+  episode: { id: string; start_time: string; cwd: string } | null;
+}
+
+export interface EngineEntityDetail {
+  entity: Record<string, unknown>;
+  mentioningAtoms: Array<{ id: string; content: string; kind: string; created_at: string; prominence: number }>;
+  associations: Array<{ id: string; name: string; type: string; weight: number }>;
+}
+
+export interface EngineNeighborhood {
+  nodes: Array<{ id: string; name: string; type: string; activation: number }>;
+  edges: Array<{ source: string; target: string; weight: number }>;
+}
+
+export interface EngineEpisode {
+  id: string;
+  start_time: string;
+  end_time: string;
+  cwd: string;
+  source_instance: string;
+  closed: boolean;
+  atomCount: number;
+}
+
+export async function fetchEngineOverview(): Promise<EngineOverview | null> {
+  const res = await fetch(`${BASE}/engine/overview`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function searchEngine(q: string): Promise<EngineSeedHit[]> {
+  const res = await fetch(`${BASE}/engine/search?q=${encodeURIComponent(q)}`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function fetchEngineAtom(id: string): Promise<EngineAtomDetail | null> {
+  const res = await fetch(`${BASE}/engine/atom/${encodeURIComponent(id)}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function fetchEngineEntity(id: string): Promise<EngineEntityDetail | null> {
+  const res = await fetch(`${BASE}/engine/entity/${encodeURIComponent(id)}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function fetchEngineNeighborhood(
+  id: string, hops: 1 | 2 = 1,
+): Promise<EngineNeighborhood | null> {
+  const res = await fetch(`${BASE}/engine/neighborhood/${encodeURIComponent(id)}?hops=${hops}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function fetchEngineEpisodes(): Promise<EngineEpisode[]> {
+  const res = await fetch(`${BASE}/engine/episodes`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
 export function startIngestion(
   onMessage: (msg: string) => void,
   onDone: () => void,

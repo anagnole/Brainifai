@@ -3,14 +3,15 @@ import { GraphExplorer } from './components/GraphExplorer';
 import { Dashboard } from './components/Dashboard';
 import { IngestPage } from './components/IngestPage';
 import { SourcesPage } from './components/SourcesPage';
+import { EnginePage } from './components/EnginePage';
 
 /* ── Hash-based router ── */
 
-type Route = '/' | '/graph' | '/ingest' | '/sources';
+type Route = '/' | '/graph' | '/engine' | '/ingest' | '/sources';
 
 function getHash(): Route {
   const raw = window.location.hash.replace(/^#/, '') || '/';
-  if (raw === '/graph' || raw === '/ingest' || raw === '/sources') return raw;
+  if (raw === '/graph' || raw === '/engine' || raw === '/ingest' || raw === '/sources') return raw;
   return '/';
 }
 
@@ -32,6 +33,7 @@ function navigate(route: Route) {
 const NAV_ITEMS: Array<{ route: Route; label: string }> = [
   { route: '/', label: 'Dashboard' },
   { route: '/graph', label: 'Graph' },
+  { route: '/engine', label: 'Engine' },
   { route: '/ingest', label: 'Ingest' },
   { route: '/sources', label: 'Sources' },
 ];
@@ -68,6 +70,8 @@ function PageContent({ route }: { route: Route }) {
   switch (route) {
     case '/graph':
       return <GraphExplorer />;
+    case '/engine':
+      return <EnginePage />;
     case '/ingest':
       return <IngestPage />;
     case '/sources':
@@ -119,7 +123,7 @@ export function App() {
     <ErrorBoundary>
       <div className="app-shell">
         <Sidebar current={route} />
-        <main className={`app-main ${route === '/graph' ? 'app-main-graph' : ''}`}>
+        <main className={`app-main ${route === '/graph' || route === '/engine' ? 'app-main-graph' : ''}`}>
           <PageContent route={route} />
         </main>
       </div>

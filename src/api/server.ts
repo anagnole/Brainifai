@@ -12,6 +12,7 @@ import { entityRoute } from './routes/entity.js';
 import { overviewRoute } from './routes/overview.js';
 import { instancesRoute } from './routes/instances.js';
 import { ingestRoute } from './routes/ingest.js';
+import { engineRoute } from './routes/engine.js';
 import { graphInstanceRoute } from './routes/graph-instance.js';
 import { sourcesRoute } from './routes/sources.js';
 
@@ -50,6 +51,7 @@ await app.register(entityRoute, { prefix: '/api' });
 await app.register(overviewRoute, { prefix: '/api' });
 await app.register(instancesRoute, { prefix: '/api' });
 await app.register(ingestRoute, { prefix: '/api' });
+await app.register(engineRoute, { prefix: '/api' });
 await app.register(graphInstanceRoute, { prefix: '/api' });
 await app.register(sourcesRoute, { prefix: '/api' });
 
