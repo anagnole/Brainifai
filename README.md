@@ -34,17 +34,20 @@ src/
   api/              Fastify REST API (graph visualization, ingestion triggers)
   cli/              CLI commands (init, status, list, describe, doctor, remove, ingest)
   context/          Context function registry, per-instance resolution
-    functions/      Base tools + coding bridge + EHR + project-manager + researcher
+    functions/      Base tools + coding bridge + EHR + project-manager + researcher + engine primitives
   event-bus/        File-based pub/sub for inter-instance messaging
-  graphstore/       Kuzu adapter, on-demand wrapper, EHR + project-manager + researcher schemas, researcher-adapter
-  hooks/            PreToolUse (KG context injection), SessionStart
-  ingestion/        Slack, GitHub, ClickUp, Apple Calendar, Twitter/X (raw fetch, cookie auth), Claude Code, project-manager, researcher/ (LLM extraction), researcher-pipeline/ (self-contained ingestion)
+  graph-engine/     Reusable engine: schema-builder, write-path, resolver, extraction worker,
+                    reads, embeddings, vector search, maintenance passes
+  graphstore/       Legacy Kuzu adapters (EHR, project-manager, researcher schemas)
+  hooks/            PreToolUse, SessionStart (engine working memory + legacy KG context)
+  ingestion/        Slack, GitHub, ClickUp, Apple Calendar, Twitter/X, Claude Code,
+                    project-manager, researcher-pipeline (self-contained ingestion)
   instance/         Instance model, templates, init, resolve, lifecycle, skill generator
+  instances/        Per-instance type config (currently `general`: schema spec, retrieval functions)
   mcp/              MCP server, instance-aware tool registration
-  orchestrator/     AI classifier, router, data delivery (Claude Haiku subprocess)
   shared/           Constants, logger, graphstore singleton
-  viz/              React + Sigma.js graph visualization UI
-  scripts/          Utilities (test-connection, seed-schema)
+  viz/              React + Sigma.js graph visualization UI (engine viz tab)
+  scripts/          Utilities (test-connection, seed-schema, longform-test, smoke-general)
 bin/
   brainifai.js      CLI entrypoint
 ```
@@ -114,9 +117,11 @@ Instances are bootstrapped from templates that configure which context functions
 | **project-manager** | Git repos (auto-scanned) | `search_projects`, `get_project_health`, `get_project_activity`, `get_cross_project_impact`, `find_stale_projects`, `get_dependency_graph`, `get_claude_session_history` |
 | **ehr** | Static clinical data | `search_patients`, `get_patient_summary`, `get_medications`, `get_diagnoses`, `get_labs`, `get_temporal_relation`, `find_cohort` |
 | **researcher** | Twitter/X (+ any source) | Base 4 + `get_landscape`, `get_entity_timeline`, `get_trending`, `get_entity_network`, `search_events` |
-| **general** | All sources | Base 5 (broad context, cross-topic) |
+| **general** | All sources | Engine primitives: `working_memory`, `associate`, `recall_episode`, `consolidate` |
 
-Base tools (all non-EHR instances): `search_entities`, `get_entity_summary`, `get_recent_activity`, `get_context_packet`, `ingest_memory`.
+Base tools (legacy non-EHR instances): `search_entities`, `get_entity_summary`, `get_recent_activity`, `get_context_packet`, `ingest_memory`.
+
+The **general** instance uses the new graph engine — Atom/Entity/Episode schema, brain-inspired retrieval primitives (working memory, spreading activation, episodic recall, consolidation with optional supersedes), local embeddings, and scheduled maintenance passes (tier-recompute + alias-confirm so far).
 
 The **coding** instance bridges to [GitNexus](https://github.com/anagnole/gitnexus) for code intelligence — symbol context, call chains, and blast radius analysis.
 
@@ -212,18 +217,27 @@ The global MCP server is configured in `~/.claude/settings.json`. For project-sp
 Brainifai includes Claude Code hooks for automatic context enrichment:
 
 - **PreToolUse** — injects relevant KG context before Claude uses a tool
-- **SessionStart** — initializes session-scoped context from the graph
+- **SessionStart** — pulls working-memory atoms (here + global) from the engine into the session header
+- **PostToolUse (auto-remember)** — after a `git commit`, instructs Claude to call `consolidate` so the commit becomes a memory
+
+### Skills
+
+Manual counterparts to the hooks, invoked via `/<name>`:
+
+- **`/where`** — show current instance + recent atoms (here + global)
+- **`/recall <cue>`** — search the graph by paraphrase via spreading activation
+- **`/remember`** — capture the current conversation as a knowledge atom
 
 ## Multi-instance architecture
 
 The system is built around a tree of instances coordinated by a global orchestrator:
 
-- **Global instance** (`~/.brainifai/`) — ingests from all external sources, maintains a registry of children, runs the orchestrator
-- **Project instances** (`<project>/.brainifai/`) — specialized DBs and tools scoped to a project
+- **Global instance** (`~/.brainifai/global/`) — the always-on `general` instance. Ingests across sources, holds the engine-backed Atom/Entity/Episode graph, exposes the engine primitives via MCP
+- **Project instances** (`<project>/.brainifai/<name>/`) — specialized DBs and tools scoped to a project; auto-resolved from cwd
 - **Event bus** — file-based pub/sub for `data.push`, `instance.registered`, `query.request/response` messages
-- **Orchestrator** — AI-powered classifier (Claude Haiku subprocess) that reads instance descriptions and routes ingested data to matching children
 - **Context functions** — composable, per-instance tools registered in a global registry and activated based on instance config/template
 - **Skill generator** — auto-generates Claude Code skills from an instance's active context functions
+- **Maintenance passes** — scheduled background jobs over the engine graph (`tier-recompute`, `alias-confirm` shipped; `dedupe`, `summarize`, `theme-detect`, `aging-audit` planned)
 
 ## Key design decisions
 
@@ -235,8 +249,9 @@ The system is built around a tree of instances coordinated by a global orchestra
 - OnDemand graph store for MCP/hooks — avoids write lock contention with ingestion
 - Each instance self-describes so the orchestrator can route without hardcoded rules
 - Cross-source identity resolution links the same person across Slack, GitHub, and email
-- LLM extraction via @anagnole/claude-cli-wrapper — uses Claude CLI subscription, not Anthropic API
-- Researcher instances have dedicated ingestion pipelines (like project-manager) — no orchestrator needed
+- All LLM calls route through `@anagnole/claude-cli-wrapper` (Claude CLI subscription, never the Anthropic API). `ANTHROPIC_API_KEY` is intentionally stripped at startup
+- The graph engine is reusable: each instance type plugs in a `SchemaSpec` (atom kinds, entity types, occurrence/association edges, resolver weights, maintenance policies) and gets writes, reads, embeddings, and maintenance for free
+- Researcher and project-manager instances have dedicated ingestion pipelines
 
 ## Tech stack
 

@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { resolve } from 'node:path';
 import type { ContextFunction } from '../types.js';
 import type { GraphEngineInstance } from '../../graph-engine/instance.js';
-import { getEngine } from '../../graph-engine/singleton.js';
+import { getEngine, ensureWorker } from '../../graph-engine/singleton.js';
 import { generalSpec } from '../../instances/general/schema.js';
 import {
   working_memory,
@@ -26,12 +26,11 @@ import { logger } from '../../shared/logger.js';
  * opens its DB. First call per process pays ~1-2s for Kuzu warm-up.
  */
 async function getActiveEngine(): Promise<GraphEngineInstance> {
-  if (process.env.BRAINIFAI_ENGINE_DB) {
-    return getEngine(process.env.BRAINIFAI_ENGINE_DB, generalSpec);
-  }
-  const resolved = resolveInstance();
-  const dbPath = resolve(resolved.dbPath);
-  return getEngine(dbPath, generalSpec);
+  const dbPath = process.env.BRAINIFAI_ENGINE_DB
+    ?? resolve(resolveInstance().dbPath);
+  const engine = await getEngine(dbPath, generalSpec);
+  ensureWorker(engine, { emptyPollMs: 1500 });
+  return engine;
 }
 
 // ─── working_memory ─────────────────────────────────────────────────────────

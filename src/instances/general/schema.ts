@@ -50,6 +50,8 @@ export const generalSpec: SchemaSpec = {
     uncertainThreshold: 0.50,
   },
 
-  // Phase 9 — maintenance policies will be added when the maintenance runner lands.
-  maintenancePolicies: [],
+  maintenancePolicies: [
+    { pass: 'tier-recompute', cadence: 'nightly' },
+    { pass: 'alias-confirm',  cadence: 'weekly', config: { limit: 20 } },
+  ],
 };

@@ -110,3 +110,13 @@ export {
   getOrCreateActiveEpisode,
   type StartEpisodeInput,
 } from './episode.js';
+export {
+  runMaintenance,
+  getPass,
+  listPasses,
+  type MaintenancePass,
+  type MaintenanceTrigger,
+  type PassStats,
+  type RunOptions,
+  type RunReport,
+} from './maintenance/index.js';
