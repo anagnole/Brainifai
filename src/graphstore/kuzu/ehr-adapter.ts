@@ -124,15 +124,26 @@ export class EhrGraphStore {
   }
 
   private async query(cypher: string, params?: Record<string, KuzuValue>): Promise<Record<string, KuzuValue>[]> {
+    let rows: Record<string, KuzuValue>[];
     if (params && Object.keys(params).length > 0) {
       const ps = await this.conn.prepare(cypher);
       const result = await this.conn.execute(ps, params);
       const qr = Array.isArray(result) ? result[0] : result;
-      return qr.getAll();
+      rows = await qr.getAll();
+    } else {
+      const result = await this.conn.query(cypher);
+      const qr = Array.isArray(result) ? result[0] : result;
+      rows = await qr.getAll();
     }
-    const result = await this.conn.query(cypher);
-    const qr = Array.isArray(result) ? result[0] : result;
-    return qr.getAll();
+    // Kuzu returns DATE columns as JS Date objects. Normalize to YYYY-MM-DD
+    // strings so downstream "as string" casts and JSON responses stay stable.
+    for (const row of rows) {
+      for (const k of Object.keys(row)) {
+        const v = row[k];
+        if (v instanceof Date) row[k] = v.toISOString().slice(0, 10) as KuzuValue;
+      }
+    }
+    return rows;
   }
 
   // ─── Patient Summary ──────────────────────────────────────────────────────
@@ -270,7 +281,7 @@ export class EhrGraphStore {
     const params: Record<string, KuzuValue> = { id: patientId };
 
     if (opts?.active) {
-      filters.push("(r.stop_date IS NULL OR r.stop_date = '')");
+      filters.push("r.stop_date IS NULL");
     }
     if (opts?.name) {
       filters.push('m.description CONTAINS $name');
@@ -303,15 +314,34 @@ export class EhrGraphStore {
 
   async getPatientConditions(
     patientId: string,
-    opts?: { status?: 'active' | 'resolved' },
+    opts?: { status?: 'active' | 'resolved'; includeFindings?: boolean },
   ): Promise<ConditionRecord[]> {
     const filters = ['p.patient_id = $id'];
     const params: Record<string, KuzuValue> = { id: patientId };
 
     if (opts?.status === 'active') {
-      filters.push("(r.stop_date IS NULL OR r.stop_date = '')");
+      filters.push("r.stop_date IS NULL");
     } else if (opts?.status === 'resolved') {
-      filters.push("r.stop_date IS NOT NULL AND r.stop_date <> ''");
+      filters.push("r.stop_date IS NOT NULL");
+    }
+    // Synthea encodes SDoH ("Full-time employment", "Educated to high school
+    // level") as SNOMED 'finding' concepts on the same DIAGNOSED_WITH edge as
+    // clinical 'disorder' entries. Exclude findings by default so "list active
+    // problems" returns medical diagnoses, not social context. BUT some
+    // findings are clinically meaningful (Prediabetes, Hyperglycemia etc.) —
+    // let those through via an allow-list. Mirrors the ThesisBrainifai
+    // in-process tool (src/api/tools.ts findingsAllowlistCypher).
+    if (!opts?.includeFindings) {
+      const allowlist = [
+        "'Prediabetes (finding)'",
+        "'Hypoxemia (finding)'",
+        "'Hyperglycemia (finding)'",
+        "'Hypoglycemia (finding)'",
+        "'Proteinuria (finding)'",
+        "'Microalbuminuria (finding)'",
+        "'Loss of taste (finding)'",
+      ].join(', ');
+      filters.push(`(NOT c.description ENDS WITH '(finding)' OR c.description IN [${allowlist}])`);
     }
 
     const rows = await this.query(
@@ -787,5 +817,502 @@ export class EhrGraphStore {
       units: sample.units || null,
       observation_description: sample.desc || null,
     };
+  }
+
+  // ─── Patient Age ──────────────────────────────────────────────────────────
+
+  /**
+   * Calendar-correct age calculation. Returns age at `asOf` (defaults to today),
+   * clamped to age-at-death if the patient was deceased before `asOf`.
+   */
+  async getPatientAge(patientId: string, asOf?: string): Promise<{
+    patient_id: string;
+    age_years: number;
+    birth_date: string;
+    as_of: string;
+    deceased: boolean;
+  } | { error: string }> {
+    const rows = await this.query(
+      `MATCH (p:Patient {patient_id: $id})
+       RETURN p.birth_date AS birth_date, p.death_date AS death_date`,
+      { id: patientId },
+    );
+    if (rows.length === 0) return { error: `Patient ${patientId} not found` };
+    const birth = String(rows[0].birth_date ?? '');
+    if (!birth) return { error: `Patient ${patientId} has no birth_date` };
+    const death = String(rows[0].death_date ?? '');
+    const today = new Date().toISOString().slice(0, 10);
+    const target = asOf ?? today;
+    const reference = death && death < target ? death : target;
+    const b = new Date(birth);
+    const a = new Date(reference);
+    let years = a.getUTCFullYear() - b.getUTCFullYear();
+    const monthDiff = a.getUTCMonth() - b.getUTCMonth();
+    const dayDiff = a.getUTCDate() - b.getUTCDate();
+    if (monthDiff < 0 || (monthDiff === 0 && dayDiff < 0)) years--;
+    return {
+      patient_id: patientId,
+      age_years: years,
+      birth_date: birth,
+      as_of: reference,
+      deceased: Boolean(death) && death <= target,
+    };
+  }
+
+  // ─── Compare Observations ────────────────────────────────────────────────
+
+  /**
+   * Compare two values of the same lab for a patient. Default pair is
+   * earliest vs. most-recent; pass dateA/dateB to pick the values nearest
+   * those dates. Prefers value_canonical (unit-normalized at ingest).
+   */
+  async compareObservations(opts: {
+    patientId: string;
+    observationCode: string;
+    dateA?: string;
+    dateB?: string;
+  }): Promise<Record<string, unknown>> {
+    const rows = await this.query(
+      `MATCH (:Patient {patient_id: $id})-[r:HAS_RESULT]->(o:ConceptObservation {code: $code})
+       RETURN r.value AS value, r.units AS units,
+              r.value_canonical AS vc, r.units_canonical AS uc,
+              r.date AS date, o.description AS description
+       ORDER BY r.date ASC`,
+      { id: opts.patientId, code: opts.observationCode },
+    );
+    if (rows.length === 0) {
+      return { error: `No observations with code ${opts.observationCode} found for patient ${opts.patientId}` };
+    }
+
+    // Replace raw value/units with canonical when available
+    for (const r of rows) {
+      const vc = r.vc;
+      if (typeof vc === 'number' && Number.isFinite(vc)) {
+        r.value = vc as KuzuValue;
+        r.units = (r.uc ?? r.units) as KuzuValue;
+      }
+    }
+
+    if (rows.length === 1) {
+      return {
+        single_value: true,
+        value: rows[0].value,
+        units: rows[0].units,
+        date: rows[0].date,
+        description: rows[0].description,
+        note: 'Only one observation exists; nothing to compare against.',
+      };
+    }
+
+    const numeric = rows
+      .map((r) => ({ raw: r, num: typeof r.value === 'number' ? r.value : parseFloat(String(r.value ?? '')) }))
+      .filter((r) => Number.isFinite(r.num));
+    if (numeric.length < 2) {
+      return { error: `Observations exist but fewer than two have numeric values for code ${opts.observationCode}` };
+    }
+
+    const pickNearest = (target: string) =>
+      numeric.reduce((best, cur) => {
+        const bg = Math.abs(new Date(String(best.raw.date)).getTime() - new Date(target).getTime());
+        const cg = Math.abs(new Date(String(cur.raw.date)).getTime() - new Date(target).getTime());
+        return cg < bg ? cur : best;
+      });
+
+    const pa = opts.dateA ? pickNearest(opts.dateA) : numeric[0];
+    const pb = opts.dateB ? pickNearest(opts.dateB) : numeric[numeric.length - 1];
+    const delta = pb.num - pa.num;
+    const days = Math.round(
+      (new Date(String(pb.raw.date)).getTime() - new Date(String(pa.raw.date)).getTime()) / 86_400_000,
+    );
+    const direction = Math.abs(delta) < 1e-9 ? 'stable' : delta > 0 ? 'rising' : 'falling';
+
+    return {
+      observation_code: opts.observationCode,
+      description: pa.raw.description,
+      value_a: pa.num,
+      date_a: pa.raw.date,
+      value_b: pb.num,
+      date_b: pb.raw.date,
+      units: pa.raw.units,
+      delta: Math.round(delta * 100) / 100,
+      direction,
+      days_between: Math.abs(days),
+    };
+  }
+
+  // ─── Cohort Observation Distribution ─────────────────────────────────────
+
+  async cohortObservationDistribution(opts: {
+    condition: string;
+    observationCode?: string;
+    observationDescription?: string;
+    thresholds?: number[];
+  }): Promise<Record<string, unknown>> {
+    const { condition, observationCode, observationDescription, thresholds } = opts;
+    if (!observationCode && !observationDescription) {
+      throw new Error('Either observationCode or observationDescription is required');
+    }
+    const obsFilter = observationCode ? 'o.code = $obs' : 'LOWER(o.description) CONTAINS LOWER($obs)';
+    const obsParam = observationCode ?? observationDescription!;
+
+    const rows = await this.query(
+      `MATCH (p:Patient)-[:DIAGNOSED_WITH]->(c:ConceptCondition)
+       WHERE LOWER(c.description) CONTAINS LOWER($cond)
+       MATCH (p)-[r:HAS_RESULT]->(o:ConceptObservation)
+       WHERE ${obsFilter}
+       RETURN p.patient_id AS pid, r.value AS value, r.units AS units,
+              r.value_canonical AS vc, r.units_canonical AS uc,
+              r.date AS date, o.description AS description`,
+      { cond: condition, obs: obsParam },
+    );
+
+    interface Latest { value: number; units: string; desc: string; date: string }
+    const latest = new Map<string, Latest>();
+    for (const row of rows) {
+      const pid = row.pid as string;
+      const vc = row.vc;
+      const hasCanonical = typeof vc === 'number' && Number.isFinite(vc);
+      const value = hasCanonical
+        ? (vc as number)
+        : typeof row.value === 'number' ? row.value : parseFloat(String(row.value ?? ''));
+      if (!Number.isFinite(value)) continue;
+      const units = hasCanonical ? String(row.uc ?? '') : String(row.units ?? '');
+      const d = String(row.date ?? '');
+      const existing = latest.get(pid);
+      if (!existing || d > existing.date) {
+        latest.set(pid, { value, units, desc: String(row.description ?? ''), date: d });
+      }
+    }
+
+    const values = [...latest.values()].map((l) => l.value);
+    if (values.length === 0) {
+      return {
+        cohort_size: 0,
+        observation_description: observationDescription ?? observationCode,
+        buckets: [],
+        note: `No numeric observations for condition '${condition}'`,
+      };
+    }
+
+    const ts = thresholds && thresholds.length > 0
+      ? [...thresholds].map(Number).filter(Number.isFinite).sort((a, b) => a - b)
+      : null;
+    const minV = Math.min(...values);
+    const maxV = Math.max(...values);
+    const boundaries = ts && ts.length > 0
+      ? ts
+      : (() => {
+          if (minV === maxV) return [minV];
+          const step = (maxV - minV) / 5;
+          return [1, 2, 3, 4].map((i) => minV + step * i);
+        })();
+
+    const counts = new Array(boundaries.length + 1).fill(0);
+    for (const v of values) {
+      let placed = false;
+      for (let i = 0; i < boundaries.length; i++) {
+        if (v <= boundaries[i]) { counts[i]++; placed = true; break; }
+      }
+      if (!placed) counts[counts.length - 1]++;
+    }
+    const labels = boundaries.map((b, i) => {
+      const lower = i === 0 ? '-inf' : String(boundaries[i - 1]);
+      return `(${lower}, ${b}]`;
+    });
+    labels.push(`(${boundaries[boundaries.length - 1]}, +inf)`);
+
+    const sample = latest.values().next().value as Latest;
+    return {
+      cohort_size: latest.size,
+      observation_description: sample.desc,
+      units: sample.units || null,
+      min: Math.round(minV * 100) / 100,
+      max: Math.round(maxV * 100) / 100,
+      buckets: labels.map((label, i) => ({ range: label, count: counts[i] })),
+      thresholds_used: boundaries,
+    };
+  }
+
+  // ─── Medication Adherence ─────────────────────────────────────────────────
+
+  async getMedicationAdherence(opts: {
+    patientId: string;
+    medicationCode?: string;
+    medicationName?: string;
+  }): Promise<Record<string, unknown>> {
+    const { patientId, medicationCode, medicationName } = opts;
+    if (!medicationCode && !medicationName) {
+      return { error: 'Either medicationCode or medicationName is required' };
+    }
+    const filter = medicationCode ? 'm.code = $code' : 'LOWER(m.description) CONTAINS LOWER($name)';
+    const params: Record<string, KuzuValue> = { id: patientId };
+    if (medicationCode) params.code = medicationCode; else params.name = medicationName!;
+
+    const rows = await this.query(
+      `MATCH (:Patient {patient_id: $id})-[r:PRESCRIBED]->(m:ConceptMedication)
+       WHERE ${filter}
+       RETURN m.code AS code, m.description AS description,
+              r.start_date AS start_date, r.stop_date AS stop_date
+       ORDER BY r.start_date ASC`,
+      params,
+    );
+    if (rows.length === 0) {
+      return { error: `No prescriptions matching ${medicationCode ?? medicationName} for patient ${patientId}` };
+    }
+
+    interface Pair { start: string; stop: string | null }
+    const byMed = new Map<string, { description: string; pairs: Pair[] }>();
+    for (const r of rows) {
+      const rx = r.code as string;
+      if (!byMed.has(rx)) byMed.set(rx, { description: r.description as string, pairs: [] });
+      byMed.get(rx)!.pairs.push({
+        start: String(r.start_date),
+        stop: r.stop_date ? String(r.stop_date) : null,
+      });
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const perMed = [...byMed.entries()].map(([rx, info]) => {
+      const pairs = [...info.pairs].sort((a, b) => a.start.localeCompare(b.start));
+      let totalDaysOnMed = 0;
+      let totalGapDays = 0;
+      const gaps: { gap_days: number; between_stop: string; next_start: string }[] = [];
+      for (let i = 0; i < pairs.length; i++) {
+        const p = pairs[i];
+        const effectiveStop = p.stop ?? today;
+        totalDaysOnMed += Math.max(0, Math.round(
+          (new Date(effectiveStop).getTime() - new Date(p.start).getTime()) / 86_400_000,
+        ));
+        if (p.stop && i < pairs.length - 1) {
+          const nextStart = pairs[i + 1].start;
+          if (nextStart > p.stop) {
+            const gapDays = Math.round(
+              (new Date(nextStart).getTime() - new Date(p.stop).getTime()) / 86_400_000,
+            );
+            if (gapDays > 0) {
+              totalGapDays += gapDays;
+              gaps.push({ gap_days: gapDays, between_stop: p.stop, next_start: nextStart });
+            }
+          }
+        }
+      }
+      const totalSpan = totalDaysOnMed + totalGapDays;
+      const coverageRatio = totalSpan > 0 ? totalDaysOnMed / totalSpan : null;
+      const adherence = coverageRatio == null ? null
+        : coverageRatio >= 0.8 ? 'adherent'
+        : coverageRatio >= 0.5 ? 'partial' : 'poor';
+      return {
+        medication_code: rx,
+        description: info.description,
+        prescription_count: pairs.length,
+        first_start: pairs[0].start,
+        last_start: pairs[pairs.length - 1].start,
+        currently_active: pairs.some((p) => p.stop === null),
+        days_covered: totalDaysOnMed,
+        gap_days: totalGapDays,
+        coverage_ratio: coverageRatio == null ? null : Math.round(coverageRatio * 100) / 100,
+        adherence,
+        gaps,
+      };
+    });
+
+    return { patient_id: patientId, medications: perMed };
+  }
+
+  // ─── Encounter Detail ─────────────────────────────────────────────────────
+
+  async getEncounterDetail(encounterId: string): Promise<Record<string, unknown>> {
+    const encRows = await this.query(
+      `MATCH (e:Encounter {encounter_id: $eid})
+       OPTIONAL MATCH (p:Patient)-[:HAD_ENCOUNTER]->(e)
+       OPTIONAL MATCH (e)-[:TREATED_BY]->(prov:Provider)
+       OPTIONAL MATCH (e)-[:AT_ORGANIZATION]->(org:Organization)
+       RETURN e.encounter_class AS class, e.description AS description,
+              e.start_date AS start_date, e.stop_date AS stop_date,
+              e.reason_code AS reason_code, e.reason_description AS reason_description,
+              p.patient_id AS patient_id, p.first_name AS first_name, p.last_name AS last_name,
+              prov.name AS provider_name, prov.specialty AS provider_specialty,
+              org.name AS organization_name`,
+      { eid: encounterId },
+    );
+    if (encRows.length === 0) return { error: `Encounter ${encounterId} not found` };
+    const enc = encRows[0];
+
+    const [conditions, medications, labs, procedures] = await Promise.all([
+      this.query(
+        `MATCH (:Patient)-[r:DIAGNOSED_WITH {encounter_id: $eid}]->(c:ConceptCondition)
+         RETURN c.code AS code, c.description AS description, r.start_date AS start_date`,
+        { eid: encounterId },
+      ),
+      this.query(
+        `MATCH (:Patient)-[r:PRESCRIBED {encounter_id: $eid}]->(m:ConceptMedication)
+         RETURN m.code AS code, m.description AS description,
+                r.start_date AS start_date, r.stop_date AS stop_date,
+                r.reason_description AS reason`,
+        { eid: encounterId },
+      ),
+      this.query(
+        `MATCH (:Patient)-[r:HAS_RESULT {encounter_id: $eid}]->(o:ConceptObservation)
+         RETURN o.code AS code, o.description AS description,
+                r.value AS value, r.units AS units, r.value_canonical AS value_canonical,
+                r.units_canonical AS units_canonical, r.date AS date`,
+        { eid: encounterId },
+      ),
+      this.query(
+        `MATCH (:Patient)-[r:UNDERWENT {encounter_id: $eid}]->(pr:ConceptProcedure)
+         RETURN pr.code AS code, pr.description AS description,
+                r.start_date AS start_date, r.stop_date AS stop_date,
+                r.reason_description AS reason`,
+        { eid: encounterId },
+      ),
+    ]);
+
+    return {
+      encounter_id: encounterId,
+      class: enc.class,
+      description: enc.description,
+      start_date: enc.start_date,
+      stop_date: enc.stop_date,
+      reason: enc.reason_description,
+      patient: enc.patient_id
+        ? { patient_id: enc.patient_id, name: `${enc.first_name} ${enc.last_name}` }
+        : null,
+      provider: enc.provider_name
+        ? { name: enc.provider_name, specialty: enc.provider_specialty }
+        : null,
+      organization: enc.organization_name ?? null,
+      conditions,
+      medications,
+      labs,
+      procedures,
+    };
+  }
+
+  // ─── List Treatments for Condition ────────────────────────────────────────
+
+  async listTreatmentsForCondition(opts: {
+    condition: string;
+    limit?: number;
+  }): Promise<Record<string, unknown>> {
+    const { condition } = opts;
+    const limit = Math.min(opts.limit ?? 20, 100);
+    const byCode = /^\d{5,20}$/.test(condition.trim());
+    const condFilter = byCode ? 'c.code = $condition' : 'LOWER(c.description) CONTAINS LOWER($condition)';
+
+    const rows = await this.query(
+      `MATCH (m:ConceptMedication)-[:TREATS]->(c:ConceptCondition)
+       WHERE ${condFilter}
+       MATCH (p:Patient)-[r:PRESCRIBED]->(m)
+       WHERE r.reason_code = c.code
+       RETURN m.code AS code, m.description AS description,
+              c.code AS condition_code, c.description AS condition_description,
+              count(DISTINCT p) AS patient_count,
+              count(DISTINCT r.start_date) AS distinct_rx_dates
+       ORDER BY patient_count DESC, distinct_rx_dates DESC
+       LIMIT ${limit}`,
+      { condition },
+    );
+
+    if (rows.length === 0) {
+      return {
+        condition_query: condition,
+        note: `No TREATS edges found for condition '${condition}'`,
+        medications: [],
+      };
+    }
+
+    return {
+      condition_query: condition,
+      medications: rows.map((r) => ({
+        code: r.code,
+        description: r.description,
+        condition_code: r.condition_code,
+        condition_description: r.condition_description,
+        patient_count: Number(r.patient_count),
+        distinct_prescription_dates: Number(r.distinct_rx_dates),
+      })),
+    };
+  }
+
+  // ─── Patient Procedures ───────────────────────────────────────────────────
+
+  async getPatientProcedures(patientId: string): Promise<ProcedureRecord[]> {
+    const rows = await this.query(
+      `MATCH (:Patient {patient_id: $id})-[r:UNDERWENT]->(pr:ConceptProcedure)
+       RETURN pr.code AS code, pr.system AS system, pr.description AS description,
+              r.start_date AS start_date, r.stop_date AS stop_date,
+              r.reason_code AS reason_code, r.reason_description AS reason_description,
+              r.encounter_id AS encounter_id
+       ORDER BY r.start_date DESC`,
+      { id: patientId },
+    );
+    return rows.map((r) => ({
+      code: r.code as string,
+      system: (r.system as string) ?? '',
+      description: r.description as string,
+      start_date: (r.start_date as string) ?? '',
+      stop_date: (r.stop_date as string) ?? '',
+      reason_code: (r.reason_code as string) ?? '',
+      reason_description: (r.reason_description as string) ?? '',
+      encounter_id: (r.encounter_id as string) ?? '',
+    }));
+  }
+
+  // ─── Rank Conditions in Cohort ────────────────────────────────────────────
+
+  async rankConditionsInCohort(opts: {
+    conditions?: string[];
+    medications?: string[];
+    ageRange?: [number, number];
+    gender?: string;
+    includeFindings?: boolean;
+    limit?: number;
+  }): Promise<Array<{ description: string; code: string; patient_count: number }>> {
+    const limit = Math.min(opts.limit ?? 10, 100);
+    const matchClauses: string[] = ['MATCH (p:Patient)'];
+    const filters: string[] = [];
+    const params: Record<string, KuzuValue> = {};
+
+    if (opts.conditions) {
+      opts.conditions.forEach((cond, i) => {
+        matchClauses.push(`MATCH (p)-[:DIAGNOSED_WITH]->(c${i}:ConceptCondition)`);
+        filters.push(`LOWER(c${i}.description) CONTAINS LOWER($cond${i})`);
+        params[`cond${i}`] = cond;
+      });
+    }
+    if (opts.medications) {
+      opts.medications.forEach((med, i) => {
+        matchClauses.push(`MATCH (p)-[:PRESCRIBED]->(m${i}:ConceptMedication)`);
+        filters.push(`LOWER(m${i}.description) CONTAINS LOWER($med${i})`);
+        params[`med${i}`] = med;
+      });
+    }
+    if (opts.gender) {
+      filters.push('p.gender = $gender');
+      params.gender = opts.gender;
+    }
+
+    // Findings filter is combined with the new MATCH, not the cohort WHERE,
+    // because the ranking MATCH introduces its own c variable.
+    const cohortWhere = filters.length > 0 ? 'WHERE ' + filters.join(' AND ') : '';
+    const findingFilter = opts.includeFindings
+      ? ''
+      : (cohortWhere ? " AND NOT c.description ENDS WITH '(finding)'" : "WHERE NOT c.description ENDS WITH '(finding)'");
+
+    const rows = await this.query(
+      `${matchClauses.join('\n')}
+       MATCH (p)-[:DIAGNOSED_WITH]->(c:ConceptCondition)
+       ${cohortWhere}${findingFilter}
+       RETURN c.description AS description, c.code AS code,
+              count(DISTINCT p) AS patient_count
+       ORDER BY patient_count DESC
+       LIMIT ${limit}`,
+      params,
+    );
+    return rows.map((r) => ({
+      description: r.description as string,
+      code: r.code as string,
+      patient_count: Number(r.patient_count),
+    }));
   }
 }
