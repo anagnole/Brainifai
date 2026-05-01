@@ -7,6 +7,8 @@ import { initEventBus, closeEventBus } from '../event-bus/index.js';
 import { registerGlobalSubscriptions } from '../event-bus/global-subscriptions.js';
 import { listInstances } from '../instance/registry.js';
 import { setChildrenCache } from './children-cache.js';
+import { createApiApp } from '../api/app.js';
+import type { FastifyInstance } from 'fastify';
 
 // Catch native Kuzu errors that can escape as unhandled rejections (e.g. lock contention).
 // Without this, Node.js v24+ crashes the process instead of allowing graceful recovery.
@@ -64,10 +66,38 @@ async function main() {
 
   const instanceLabel = ctx ? `${ctx.instanceName} (${ctx.instanceType})` : 'global (default)';
   logger.info(`Brainifai MCP server started — instance: ${instanceLabel}`);
+
+  // Embed the viz API in the MCP process so the dashboard can read the engine
+  // DB while MCP holds the Kuzu lock. If port 4200 is already taken (user has
+  // a separate `npm run viz` running), fail soft — MCP itself keeps working.
+  // Disable Fastify's pino logger: stdout is reserved for MCP stdio transport.
+  await startEmbeddedVizApi();
+}
+
+let embeddedVizApp: FastifyInstance | null = null;
+
+async function startEmbeddedVizApi(): Promise<void> {
+  if (process.env.BRAINIFAI_DISABLE_EMBEDDED_VIZ === 'true') {
+    logger.info('Embedded viz API disabled via BRAINIFAI_DISABLE_EMBEDDED_VIZ');
+    return;
+  }
+  const port = parseInt(process.env.VIZ_PORT ?? '4200', 10);
+  try {
+    embeddedVizApp = await createApiApp({ logger: false });
+    await embeddedVizApp.listen({ port, host: '127.0.0.1' });
+    logger.info({ port }, 'Embedded viz API listening — dashboard will read live engine DB');
+  } catch (err) {
+    embeddedVizApp = null;
+    logger.warn(
+      { err: (err as Error).message, port },
+      'Could not start embedded viz API (port likely in use); MCP continues without dashboard',
+    );
+  }
 }
 
 main().catch(async (err) => {
   logger.error(err, 'MCP server failed to start');
+  if (embeddedVizApp) await embeddedVizApp.close().catch(() => { /* ignore */ });
   await closeEventBus();
   await closeGraphStore();
   process.exit(1);
