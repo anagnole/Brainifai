@@ -1,9 +1,13 @@
 import { Component, type ReactNode, useSyncExternalStore } from 'react';
-import { GraphExplorer } from './components/GraphExplorer';
-import { Dashboard } from './components/Dashboard';
 import { IngestPage } from './components/IngestPage';
 import { SourcesPage } from './components/SourcesPage';
 import { EnginePage } from './components/EnginePage';
+
+// Note: Dashboard and GraphExplorer used to render the legacy
+// Person/Activity/Topic schema. Since the engine schema is now the source of
+// truth, the Dashboard / Graph / Engine routes all render the engine view.
+// Keeping the routes as separate nav items for now so the URL surface stays
+// stable; we can split them again if EnginePage becomes too cluttered.
 
 /* ── Hash-based router ── */
 
@@ -68,16 +72,15 @@ function Sidebar({ current }: { current: Route }) {
 
 function PageContent({ route }: { route: Route }) {
   switch (route) {
-    case '/graph':
-      return <GraphExplorer />;
-    case '/engine':
-      return <EnginePage />;
     case '/ingest':
       return <IngestPage />;
     case '/sources':
       return <SourcesPage />;
+    case '/':
+    case '/graph':
+    case '/engine':
     default:
-      return <Dashboard />;
+      return <EnginePage />;
   }
 }
 
