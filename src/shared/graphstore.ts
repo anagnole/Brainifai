@@ -1,7 +1,9 @@
 import { resolve } from 'path';
+import { existsSync } from 'fs';
 import type { GraphStore } from '../graphstore/types.js';
 import { createGraphStore } from '../graphstore/factory.js';
 import { resolveInstanceDbPath, GLOBAL_BRAINIFAI_PATH } from '../instance/resolve.js';
+import { tryReadFolderConfig } from '../instance/folder-config.js';
 import { logger } from './logger.js';
 
 let store: GraphStore | null = null;
@@ -34,9 +36,15 @@ export async function getGraphStore(forDbPath?: string): Promise<GraphStore> {
   return store;
 }
 
-/** Get a store that always points at the global instance DB */
+/** Get a store that always points at the global instance DB. Resolves through
+ *  the FolderConfig at ~/.brainifai/ so we land on the per-instance subdir
+ *  (~/.brainifai/<name>/data/kuzu), not the legacy v1 path (~/.brainifai/data/kuzu). */
 export async function getGlobalGraphStore(): Promise<GraphStore> {
-  const globalDbPath = resolve(GLOBAL_BRAINIFAI_PATH, 'data', 'kuzu');
+  const cfg = tryReadFolderConfig(GLOBAL_BRAINIFAI_PATH);
+  const first = cfg?.instances[0];
+  const globalDbPath = first
+    ? resolve(GLOBAL_BRAINIFAI_PATH, first.name, 'data', 'kuzu')
+    : resolve(GLOBAL_BRAINIFAI_PATH, 'data', 'kuzu');
   return getGraphStore(globalDbPath);
 }
 

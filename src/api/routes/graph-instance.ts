@@ -38,9 +38,8 @@ export const graphInstanceRoute: FastifyPluginAsync = async (app) => {
       // Registry may not be reachable — fall through
     }
 
-    // Fallback: check if it's the global path
-    const globalDbPath = resolve(GLOBAL_BRAINIFAI_PATH, 'data', 'kuzu');
-    if (defaultDbPath === globalDbPath) {
+    // Fallback: check if it's any instance's path under the global folder
+    if (defaultDbPath.startsWith(GLOBAL_BRAINIFAI_PATH)) {
       return { instance: 'global' };
     }
 

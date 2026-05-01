@@ -8,7 +8,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync } from 'node:fs';
 import { getEngine } from '../../graph-engine/singleton.js';
 import { generalSpec } from '../../instances/general/schema.js';
 import { resolveCueToSeeds } from '../../graph-engine/entities.js';
@@ -17,13 +16,10 @@ import { spreadActivation } from '../../graph-engine/reads.js';
 const DEFAULT_DB = process.env.BRAINIFAI_ENGINE_DB
   ?? resolve(homedir(), '.brainifai', 'global', 'data', 'kuzu');
 
-const LONGFORM_DB = '/tmp/brainifai-longform/kuzu';
-
-/** Pick the first DB path that exists. */
+/** Default DB for the engine routes — always the global engine instance.
+ *  Override per-request via `?dbPath=...`. */
 function pickDefaultDbPath(): string {
-  if (existsSync(DEFAULT_DB)) return DEFAULT_DB;
-  if (existsSync(LONGFORM_DB)) return LONGFORM_DB;
-  return DEFAULT_DB; // caller will get an error opening it — that's informative
+  return DEFAULT_DB;
 }
 
 async function getEngineFor(dbPath?: string) {
