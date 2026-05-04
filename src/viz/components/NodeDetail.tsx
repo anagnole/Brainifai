@@ -5,18 +5,22 @@ import { fetchTimeline } from '../lib/api';
 interface Props {
   summary: EntitySummary;
   onConnectionClick: (name: string) => void;
+  /** Override timeline fetch — defaults to the legacy /api/timeline. Engine
+   *  callers pass a function that returns the entity's mentioning atoms
+   *  reshaped to TimelineItem. */
+  timelineFn?: (id: string) => Promise<TimelineItem[]>;
 }
 
-export function NodeDetail({ summary, onConnectionClick }: Props) {
+export function NodeDetail({ summary, onConnectionClick, timelineFn }: Props) {
   const [timeline, setTimeline] = useState<TimelineItem[] | null>(null);
   const [loading, setLoading] = useState(false);
 
   const loadTimeline = useCallback(async () => {
     setLoading(true);
-    const items = await fetchTimeline(summary.id);
+    const items = timelineFn ? await timelineFn(summary.id) : await fetchTimeline(summary.id);
     setTimeline(items);
     setLoading(false);
-  }, [summary.id]);
+  }, [summary.id, timelineFn]);
 
   return (
     <div className="node-detail">

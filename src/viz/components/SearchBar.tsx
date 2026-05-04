@@ -3,9 +3,14 @@ import { searchEntities, type SearchResult } from '../lib/api';
 
 interface Props {
   onSelect: (id: string) => void;
+  /** Optional override — defaults to the legacy entity search.
+   *  Engine-aware callers pass a function that hits /api/engine/search and
+   *  reshapes results into SearchResult ({id, name, type, score}). */
+  searchFn?: (q: string) => Promise<SearchResult[]>;
+  placeholder?: string;
 }
 
-export function SearchBar({ onSelect }: Props) {
+export function SearchBar({ onSelect, searchFn, placeholder }: Props) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isOpen, setIsOpen] = useState(false);
@@ -17,10 +22,10 @@ export function SearchBar({ onSelect }: Props) {
       setIsOpen(false);
       return;
     }
-    const hits = await searchEntities(q);
+    const hits = searchFn ? await searchFn(q) : await searchEntities(q);
     setResults(hits);
     setIsOpen(hits.length > 0);
-  }, []);
+  }, [searchFn]);
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -50,7 +55,7 @@ export function SearchBar({ onSelect }: Props) {
     <div className="search-bar">
       <input
         type="text"
-        placeholder="Search entities..."
+        placeholder={placeholder ?? 'Search entities...'}
         value={query}
         onChange={handleChange}
         onFocus={() => results.length > 0 && setIsOpen(true)}

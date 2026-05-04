@@ -2,7 +2,9 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   fetchInstances,
   updateDescription,
+  fetchEngineOverview,
   type Instance,
+  type EngineOverview,
 } from '../lib/api';
 
 const TYPE_COLORS: Record<string, string> = {
@@ -148,15 +150,20 @@ function InstanceCard({
 
 export function Dashboard() {
   const [instances, setInstances] = useState<Instance[]>([]);
+  const [engine, setEngine] = useState<EngineOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
 
   const load = useCallback(async () => {
     try {
-      const data = await fetchInstances();
+      const [insts, ov] = await Promise.all([
+        fetchInstances(),
+        fetchEngineOverview(),
+      ]);
       if (mountedRef.current) {
-        setInstances(data);
+        setInstances(insts);
+        setEngine(ov);
         setError(null);
       }
     } catch (err) {
@@ -184,7 +191,7 @@ export function Dashboard() {
     <div className="dashboard">
       <h1 className="dashboard-title">Dashboard</h1>
 
-      {/* Summary stats */}
+      {/* Summary stats — instance metadata + engine graph counts */}
       <div className="stats-row">
         <div className="stat-card">
           <span className="stat-number">{instances.length}</span>
@@ -194,7 +201,66 @@ export function Dashboard() {
           <span className="stat-number">{(totalDbSize / 1024 / 1024).toFixed(0)} MB</span>
           <span className="stat-label-text">Total DB Size</span>
         </div>
+        {engine && (
+          <>
+            <div className="stat-card">
+              <span className="stat-number">{engine.counts.atoms}</span>
+              <span className="stat-label-text">Atoms</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-number">{engine.counts.entities}</span>
+              <span className="stat-label-text">Entities</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-number">{engine.counts.episodes}</span>
+              <span className="stat-label-text">Episodes</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-number">{engine.counts.mentions}</span>
+              <span className="stat-label-text">Mentions</span>
+            </div>
+          </>
+        )}
       </div>
+
+      {/* Recent atoms — quick glance at what's been written lately */}
+      {engine && engine.recentAtoms.length > 0 && (
+        <div className="dashboard-section">
+          <h2 className="dashboard-section-title">Recent atoms</h2>
+          <div className="recent-atoms-list">
+            {engine.recentAtoms.slice(0, 5).map((a) => (
+              <div key={a.id} className="recent-atom-row">
+                <span className="recent-atom-meta">
+                  <span className="recent-atom-kind">{a.kind}</span>
+                  <span className="recent-atom-date">
+                    {new Date(a.created_at).toLocaleDateString()}
+                  </span>
+                </span>
+                <span className="recent-atom-content">
+                  {a.content.length > 200 ? a.content.slice(0, 200) + '…' : a.content}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Top entities — currently-prominent things in the graph */}
+      {engine && engine.topEntities.length > 0 && (
+        <div className="dashboard-section">
+          <h2 className="dashboard-section-title">Top entities</h2>
+          <div className="top-entities-list">
+            {engine.topEntities.slice(0, 12).map((e) => (
+              <div key={e.id} className="top-entity-pill">
+                <span className="top-entity-name">{e.name}</span>
+                <span className="top-entity-meta">
+                  {e.type} · {e.mentionCount}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {loading && <div className="dashboard-loading">Loading instances...</div>}
       {error && <div className="dashboard-error">{error}</div>}
