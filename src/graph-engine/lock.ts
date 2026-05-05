@@ -3,11 +3,42 @@
 // Backed by proper-lockfile: handles retry, stale detection (via PID liveness
 // check), and graceful release. Used by the write path, extraction worker, and
 // maintenance passes to serialize writes on a single Kuzu DB.
+//
+// Two-layer locking:
+//   1. In-process mutex (a Promise queue keyed on lockPath) serializes writers
+//      within the same Node process. Instant, no fs I/O, no retry needed.
+//   2. proper-lockfile takes a real OS file lock once we win the in-process
+//      queue, so cross-process contention is still safe.
+//
+// Without layer 1, the worker's post-extraction phase (~1–10s under lock) and
+// concurrent consolidate writes were both hammering proper-lockfile's retry
+// loop, occasionally exhausting it before getting the lock. Now in-process
+// callers funnel through a single mutex and proper-lockfile is hit just once
+// per logical critical section, so its retry budget is rarely needed.
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import * as plf from 'proper-lockfile';
 import { logger } from '../shared/logger.js';
+
+// ─── In-process mutex ───────────────────────────────────────────────────────
+
+/** Per-lockPath promise chain. Each acquirer awaits the previous. */
+const inProcessQueues = new Map<string, Promise<void>>();
+
+async function acquireInProcess(lockPath: string): Promise<() => void> {
+  const prev = inProcessQueues.get(lockPath) ?? Promise.resolve();
+  let releaseInProcess!: () => void;
+  const next = new Promise<void>((resolve) => {
+    releaseInProcess = resolve;
+  });
+  // Replace the chain head with this acquirer's release-promise so the next
+  // acquirer waits behind us. Map size is bounded by distinct lockPaths
+  // (typically 1 per engine), so we don't bother cleaning up.
+  inProcessQueues.set(lockPath, prev.then(() => next));
+  await prev;
+  return releaseInProcess;
+}
 
 export interface LockOptions {
   /** Max time (ms) a lock can be held before considered stale. Default: 60s. */
@@ -27,10 +58,14 @@ export interface LockHandle {
 }
 
 function defaultRetryOpts(opts?: LockOptions) {
+  // With the in-process mutex layered above proper-lockfile, the file lock
+  // is rarely contended within one process, but cross-process contention
+  // (e.g. CLI commands while MCP runs) still exists. Keep the budget
+  // generous: ~60s of patience worst-case.
   return {
-    retries: opts?.retries?.retries ?? 50,
+    retries: opts?.retries?.retries ?? 80,
     minTimeout: opts?.retries?.minTimeout ?? 50,
-    maxTimeout: opts?.retries?.maxTimeout ?? 500,
+    maxTimeout: opts?.retries?.maxTimeout ?? 1000,
     factor: opts?.retries?.factor ?? 1.5,
   };
 }
@@ -48,17 +83,36 @@ function ensureLockTarget(lockPath: string): void {
 /**
  * Acquire the lock. Returns a handle whose `release()` must be called once
  * the critical section is done. Prefer `withLock` for automatic release.
+ *
+ * Layer 1: in-process mutex (instant, queues by Promise).
+ * Layer 2: proper-lockfile OS file lock (cross-process safety).
  */
 export async function acquireLock(lockPath: string, opts?: LockOptions): Promise<LockHandle> {
   ensureLockTarget(lockPath);
 
-  const release = await plf.lock(lockPath, {
-    stale: opts?.staleMs ?? 60_000,
-    retries: defaultRetryOpts(opts),
-    onCompromised: (err) => {
-      logger.warn({ err: err.message, lockPath }, 'lock compromised (likely stale)');
-    },
-  });
+  // Layer 1: serialize within this process first. This dramatically reduces
+  // contention on the file lock when worker + writeAtom + maintenance are
+  // all running in the same MCP process.
+  const releaseInProcess = await acquireInProcess(lockPath);
+
+  let releaseFile: (() => Promise<void>) | null = null;
+  try {
+    // Layer 2: take the OS file lock. Once we own the in-process mutex, this
+    // should almost always succeed on the first try unless another process
+    // is also writing.
+    releaseFile = await plf.lock(lockPath, {
+      stale: opts?.staleMs ?? 60_000,
+      retries: defaultRetryOpts(opts),
+      onCompromised: (err) => {
+        logger.warn({ err: err.message, lockPath }, 'lock compromised (likely stale)');
+      },
+    });
+  } catch (err) {
+    // If the file lock fails, release the in-process mutex so the queue
+    // doesn't deadlock.
+    releaseInProcess();
+    throw err;
+  }
 
   let released = false;
   return {
@@ -66,9 +120,11 @@ export async function acquireLock(lockPath: string, opts?: LockOptions): Promise
       if (released) return;
       released = true;
       try {
-        await release();
+        if (releaseFile) await releaseFile();
       } catch (err) {
         logger.debug({ err: (err as Error).message, lockPath }, 'lock release error (ignored)');
+      } finally {
+        releaseInProcess();
       }
     },
   };

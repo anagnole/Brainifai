@@ -70,4 +70,42 @@ describe('lock', () => {
     await Promise.all([taskA, taskB]);
     expect(order).toEqual(['A-start', 'A-end', 'B-start', 'B-end']);
   });
+
+  // Regression for Bug 2: many concurrent in-process writers used to exhaust
+  // proper-lockfile's retry budget when one held the lock for a long write
+  // phase. With the in-process mutex layered on top, the inner ones queue
+  // instantly via Promise chaining and don't need any file-lock retries.
+  it('serializes 10 concurrent in-process writers without exhausting retries', async () => {
+    const lockPath = mkLockPath();
+    const order: number[] = [];
+    const tasks: Promise<void>[] = [];
+    for (let i = 0; i < 10; i++) {
+      tasks.push(
+        withLock(lockPath, async () => {
+          order.push(i);
+          // Hold long enough that without an in-process queue, parallel
+          // acquirers would all hit proper-lockfile and contend.
+          await new Promise((r) => setTimeout(r, 30));
+        }),
+      );
+    }
+    await Promise.all(tasks);
+    // All 10 ran, in fully serialized FIFO order.
+    expect(order).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(await isLocked(lockPath)).toBe(false);
+  });
+
+  // Regression for the failure-cleanup path: if proper-lockfile's plf.lock
+  // throws (e.g. cross-process contention exhausts retries), we must release
+  // the in-process mutex so the queue isn't deadlocked for subsequent callers.
+  it('releases the in-process mutex when an inner critical section throws', async () => {
+    const lockPath = mkLockPath();
+    await expect(withLock(lockPath, async () => {
+      throw new Error('boom');
+    })).rejects.toThrow('boom');
+    // A subsequent acquirer must not be blocked by a leaked in-process mutex.
+    let ran = false;
+    await withLock(lockPath, async () => { ran = true; });
+    expect(ran).toBe(true);
+  });
 });

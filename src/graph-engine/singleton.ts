@@ -16,9 +16,21 @@ interface Entry {
 const registry = new Map<string, Entry>();
 
 /**
+ * In-flight initialization promises, keyed by dbPath. Without this, two
+ * concurrent callers of `getEngine` for the same dbPath would each construct
+ * a fresh `GraphEngineInstance` and race for the OS-level Kuzu file lock —
+ * one wins, the rest crash with "Could not set lock on file". Cache the
+ * Promise so concurrent callers all await the same initialization.
+ */
+const initInFlight = new Map<string, Promise<GraphEngineInstance>>();
+
+/**
  * Get (or lazily open) a GraphEngineInstance for the given DB path + spec.
  * Subsequent calls with the same dbPath reuse the same engine — callers
  * should not mix specs on one DB.
+ *
+ * Concurrency-safe: parallel calls for the same dbPath all observe the same
+ * in-flight initialization and resolve to the same engine instance.
  */
 export async function getEngine(
   dbPath: string,
@@ -27,10 +39,22 @@ export async function getEngine(
   const existing = registry.get(dbPath);
   if (existing) return existing.engine;
 
-  const engine = new GraphEngineInstance({ spec, dbPath });
-  await engine.initialize();
-  registry.set(dbPath, { engine });
-  return engine;
+  const inFlight = initInFlight.get(dbPath);
+  if (inFlight) return inFlight;
+
+  const initPromise = (async () => {
+    const engine = new GraphEngineInstance({ spec, dbPath });
+    await engine.initialize();
+    registry.set(dbPath, { engine });
+    return engine;
+  })();
+  initInFlight.set(dbPath, initPromise);
+
+  try {
+    return await initPromise;
+  } finally {
+    initInFlight.delete(dbPath);
+  }
 }
 
 /**
@@ -51,6 +75,7 @@ export function ensureWorker(
 
 /** Close one engine + its worker. Removes the entry from the registry. */
 export async function closeEngine(dbPath: string): Promise<void> {
+  initInFlight.delete(dbPath);
   const entry = registry.get(dbPath);
   if (!entry) return;
   if (entry.worker) {
