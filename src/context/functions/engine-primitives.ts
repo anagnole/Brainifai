@@ -1,7 +1,15 @@
 // ─── Engine-backed ContextFunction wrappers ─────────────────────────────────
 // Exposes the graph-engine's 4 brain-inspired retrieval primitives as MCP
-// tools. These ignore the legacy `store` param and resolve their own engine
-// via the singleton keyed on the resolved instance's dbPath.
+// tools. Dual-mode execution:
+//
+//   - Leader (this process owns the Kuzu writer + the embedded HTTP API on
+//     port 4200): tool calls run locally via `*_local` helpers.
+//   - Follower (another MCP on this machine is the leader): tool calls
+//     forward to the leader over HTTP. Failover: if the HTTP call fails
+//     with a connection error, we attempt to promote ourselves and retry.
+//
+// The HTTP routes (src/api/routes/engine.ts) on the leader call the same
+// `*_local` helpers, so leader and follower return identical shapes.
 
 import { z } from 'zod';
 import { resolve } from 'node:path';
@@ -17,13 +25,17 @@ import {
 } from '../../instances/general/functions.js';
 import { resolveInstance } from '../../instance/resolve.js';
 import { logger } from '../../shared/logger.js';
+import { getRole, getLeaderUrl, tryPromoteToLeader } from '../../shared/role.js';
 
-// ─── Engine resolution ──────────────────────────────────────────────────────
+// ─── Engine resolution (leader only) ────────────────────────────────────────
 
 /**
  * Find the engine for the active instance. Prefers BRAINIFAI_ENGINE_DB env
  * (useful for viz + tests) else resolves the nearest folder's instance and
  * opens its DB. First call per process pays ~1-2s for Kuzu warm-up.
+ *
+ * Only callable in leader mode — followers forward via HTTP and never
+ * touch Kuzu directly.
  */
 async function getActiveEngine(): Promise<GraphEngineInstance> {
   const dbPath = process.env.BRAINIFAI_ENGINE_DB
@@ -31,6 +43,137 @@ async function getActiveEngine(): Promise<GraphEngineInstance> {
   const engine = await getEngine(dbPath, generalSpec);
   ensureWorker(engine, { emptyPollMs: 1500 });
   return engine;
+}
+
+// ─── Local executors (run on the leader) ────────────────────────────────────
+
+interface WorkingMemoryInput { scope?: 'global' | 'here'; limit?: number }
+interface AssociateInput { cue: string; limit?: number }
+interface RecallEpisodeInput {
+  cue?: string; from?: string; to?: string;
+  where?: string; kind?: string; limit?: number;
+}
+interface ConsolidateInput {
+  content: string;
+  kind?: string;
+  salience?: 'low' | 'normal' | 'high';
+  supersedes?: string | string[];
+}
+
+export async function workingMemoryLocal(input: WorkingMemoryInput) {
+  const engine = await getActiveEngine();
+  const atoms = await working_memory(engine, { scope: input.scope, limit: input.limit });
+  return { count: atoms.length, atoms: atoms.map(formatAtom) };
+}
+
+export async function associateLocal(input: AssociateInput) {
+  const engine = await getActiveEngine();
+  const hits = await associate(engine, { cue: input.cue, limit: input.limit });
+  return {
+    cue: input.cue,
+    count: hits.length,
+    results: hits.map((h) => ({
+      score: Number(h.score.toFixed(3)),
+      matched_entities: h.matched_entities,
+      ...formatAtom(h.atom),
+    })),
+  };
+}
+
+export async function recallEpisodeLocal(input: RecallEpisodeInput) {
+  const engine = await getActiveEngine();
+  const atoms = await recall_episode(engine, {
+    cue: input.cue,
+    where: input.where,
+    kind: input.kind,
+    limit: input.limit,
+    when: (input.from || input.to) ? { from: input.from, to: input.to } : undefined,
+  });
+  return { count: atoms.length, atoms: atoms.map(formatAtom) };
+}
+
+export async function consolidateLocal(input: ConsolidateInput) {
+  const engine = await getActiveEngine();
+  try {
+    const result = await consolidate(engine, {
+      content: input.content,
+      kind: input.kind,
+      salience: input.salience,
+      supersedes: input.supersedes,
+    });
+    return {
+      ok: true,
+      id: result.id,
+      superseded: result.superseded,
+      message: `Saved ${input.kind ?? 'observation'} (${result.id.slice(-8)}).` +
+        (result.superseded.length > 0 ? ` Superseded ${result.superseded.length} prior atom(s).` : ''),
+    };
+  } catch (err) {
+    logger.warn({ err }, 'consolidate failed');
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+// ─── Forwarder (run on followers) ───────────────────────────────────────────
+
+/**
+ * POST `input` to the leader's `/api/engine/<endpoint>`. On connection
+ * error, attempt promotion to leader and signal the caller to fall through
+ * to the local path. On HTTP error from a still-alive leader, propagate.
+ */
+async function forwardToLeader<T>(
+  endpoint: 'working_memory' | 'associate' | 'recall_episode' | 'consolidate',
+  input: unknown,
+): Promise<T> {
+  const url = `${getLeaderUrl()}/api/engine/${endpoint}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  } catch (err) {
+    // Network error → leader probably died. Try to take over.
+    logger.warn({ err: (err as Error).message, endpoint }, 'leader unreachable, attempting promotion');
+    const promoted = await tryPromoteToLeader();
+    if (promoted) {
+      // We're now leader. Retry as local.
+      return runLocal(endpoint, input) as Promise<T>;
+    }
+    // Couldn't promote (someone else became leader, or no hook). Retry HTTP once.
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Leader returned HTTP ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return await res.json() as T;
+}
+
+async function runLocal(endpoint: string, input: unknown): Promise<unknown> {
+  switch (endpoint) {
+    case 'working_memory': return workingMemoryLocal(input as WorkingMemoryInput);
+    case 'associate':       return associateLocal(input as AssociateInput);
+    case 'recall_episode':  return recallEpisodeLocal(input as RecallEpisodeInput);
+    case 'consolidate':     return consolidateLocal(input as ConsolidateInput);
+    default: throw new Error(`Unknown endpoint: ${endpoint}`);
+  }
+}
+
+/** Dispatcher used by ContextFunction.execute — picks local vs forward. */
+async function dispatch<T>(
+  endpoint: 'working_memory' | 'associate' | 'recall_episode' | 'consolidate',
+  input: unknown,
+): Promise<T> {
+  if (getRole() === 'follower') {
+    return forwardToLeader<T>(endpoint, input);
+  }
+  return runLocal(endpoint, input) as Promise<T>;
 }
 
 // ─── working_memory ─────────────────────────────────────────────────────────
@@ -48,13 +191,7 @@ export const workingMemoryFn: ContextFunction = {
       .describe('Max items to return (default 15)'),
   },
   async execute(input) {
-    const { scope, limit } = input as { scope?: 'global' | 'here'; limit?: number };
-    const engine = await getActiveEngine();
-    const atoms = await working_memory(engine, { scope, limit });
-    return {
-      count: atoms.length,
-      atoms: atoms.map(formatAtom),
-    };
+    return dispatch('working_memory', input);
   },
 };
 
@@ -73,18 +210,7 @@ export const associateFn: ContextFunction = {
       .describe('Max items to return (default 10)'),
   },
   async execute(input) {
-    const { cue, limit } = input as { cue: string; limit?: number };
-    const engine = await getActiveEngine();
-    const hits = await associate(engine, { cue, limit });
-    return {
-      cue,
-      count: hits.length,
-      results: hits.map((h) => ({
-        score: Number(h.score.toFixed(3)),
-        matched_entities: h.matched_entities,
-        ...formatAtom(h.atom),
-      })),
-    };
+    return dispatch('associate', input);
   },
 };
 
@@ -104,19 +230,7 @@ export const recallEpisodeFn: ContextFunction = {
     limit: z.number().int().min(1).max(50).optional().describe('Max items (default 20)'),
   },
   async execute(input) {
-    const { cue, from, to, where, kind, limit } = input as {
-      cue?: string; from?: string; to?: string;
-      where?: string; kind?: string; limit?: number;
-    };
-    const engine = await getActiveEngine();
-    const atoms = await recall_episode(engine, {
-      cue, where, kind, limit,
-      when: (from || to) ? { from, to } : undefined,
-    });
-    return {
-      count: atoms.length,
-      atoms: atoms.map(formatAtom),
-    };
+    return dispatch('recall_episode', input);
   },
 };
 
@@ -140,26 +254,7 @@ export const consolidateFn: ContextFunction = {
     ),
   },
   async execute(input) {
-    const { content, kind, salience, supersedes } = input as {
-      content: string;
-      kind?: string;
-      salience?: 'low' | 'normal' | 'high';
-      supersedes?: string | string[];
-    };
-    const engine = await getActiveEngine();
-    try {
-      const result = await consolidate(engine, { content, kind, salience, supersedes });
-      return {
-        ok: true,
-        id: result.id,
-        superseded: result.superseded,
-        message: `Saved ${kind ?? 'observation'} (${result.id.slice(-8)}).` +
-          (result.superseded.length > 0 ? ` Superseded ${result.superseded.length} prior atom(s).` : ''),
-      };
-    } catch (err) {
-      logger.warn({ err }, 'consolidate failed');
-      return { ok: false, error: (err as Error).message };
-    }
+    return dispatch('consolidate', input);
   },
 };
 

@@ -8,6 +8,7 @@ import { registerGlobalSubscriptions } from '../event-bus/global-subscriptions.j
 import { listInstances } from '../instance/registry.js';
 import { setChildrenCache } from './children-cache.js';
 import { createApiApp } from '../api/app.js';
+import { setRole, installPromotionHook } from '../shared/role.js';
 import type { FastifyInstance } from 'fastify';
 
 // Catch native Kuzu errors that can escape as unhandled rejections (e.g. lock contention).
@@ -68,30 +69,62 @@ async function main() {
   logger.info(`Brainifai MCP server started — instance: ${instanceLabel}`);
 
   // Embed the viz API in the MCP process so the dashboard can read the engine
-  // DB while MCP holds the Kuzu lock. If port 4200 is already taken (user has
-  // a separate `npm run viz` running), fail soft — MCP itself keeps working.
-  // Disable Fastify's pino logger: stdout is reserved for MCP stdio transport.
+  // DB while MCP holds the Kuzu lock. Also doubles as our leader-election
+  // primitive: whoever wins port 4200 is the leader. Followers forward tool
+  // calls via HTTP. See src/shared/role.ts for the protocol.
+  installPromotionHook(attemptLeaderPromotion);
   await startEmbeddedVizApi();
 }
 
 let embeddedVizApp: FastifyInstance | null = null;
 
+/**
+ * Try to bind port 4200. Whoever wins is the leader (opens engine, runs the
+ * worker, serves HTTP for itself + followers). Losing means another MCP is
+ * already the leader on this machine — we become a follower and forward
+ * tool calls via HTTP to localhost:4200.
+ */
 async function startEmbeddedVizApi(): Promise<void> {
   if (process.env.BRAINIFAI_DISABLE_EMBEDDED_VIZ === 'true') {
-    logger.info('Embedded viz API disabled via BRAINIFAI_DISABLE_EMBEDDED_VIZ');
+    // Standalone single-session mode. Act as leader (no follower forwarding).
+    setRole('leader');
+    logger.info('Embedded viz API disabled — running in solo leader mode');
     return;
   }
   const port = parseInt(process.env.VIZ_PORT ?? '4200', 10);
   try {
     embeddedVizApp = await createApiApp({ logger: false });
     await embeddedVizApp.listen({ port, host: '127.0.0.1' });
-    logger.info({ port }, 'Embedded viz API listening — dashboard will read live engine DB');
+    setRole('leader');
+    logger.info({ port }, 'Embedded viz API listening — leader mode');
   } catch (err) {
     embeddedVizApp = null;
-    logger.warn(
+    setRole('follower');
+    logger.info(
       { err: (err as Error).message, port },
-      'Could not start embedded viz API (port likely in use); MCP continues without dashboard',
+      'Port 4200 already taken — running as follower (tool calls will forward to leader)',
     );
+  }
+}
+
+/**
+ * Failover: when the active leader dies, followers' HTTP calls fail and they
+ * try to promote. Promotion = "try to become the new leader" — bind 4200,
+ * setRole('leader'), let the engine open lazily on the next tool call.
+ *
+ * Returns true if we won the leader role on this attempt (or already had it).
+ */
+async function attemptLeaderPromotion(): Promise<boolean> {
+  if (embeddedVizApp) return true; // already serving, we're leader
+  const port = parseInt(process.env.VIZ_PORT ?? '4200', 10);
+  try {
+    embeddedVizApp = await createApiApp({ logger: false });
+    await embeddedVizApp.listen({ port, host: '127.0.0.1' });
+    logger.info({ port }, 'Promoted to leader');
+    return true;
+  } catch {
+    embeddedVizApp = null;
+    return false;
   }
 }
 

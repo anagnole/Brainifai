@@ -12,6 +12,12 @@ import { getEngine } from '../../graph-engine/singleton.js';
 import { generalSpec } from '../../instances/general/schema.js';
 import { resolveCueToSeeds } from '../../graph-engine/entities.js';
 import { spreadActivation } from '../../graph-engine/reads.js';
+import {
+  workingMemoryLocal,
+  associateLocal,
+  recallEpisodeLocal,
+  consolidateLocal,
+} from '../../context/functions/engine-primitives.js';
 
 const DEFAULT_DB = process.env.BRAINIFAI_ENGINE_DB
   ?? resolve(homedir(), '.brainifai', 'global', 'data', 'kuzu');
@@ -196,6 +202,28 @@ export const engineRoute: FastifyPluginAsync = async (app) => {
       };
     },
   );
+
+  // ─── MCP-primitive POST routes ───────────────────────────────────────────
+  // The leader exposes the 4 MCP tools as HTTP endpoints. Followers (other
+  // MCP processes on this machine) forward to these so we never have two
+  // processes fighting for the Kuzu writer lock. Identical request/response
+  // shape to what MCP's stdio transport returns. See engine-primitives.ts.
+
+  app.post<{ Body: unknown }>('/engine/working_memory', async (req) => {
+    return await workingMemoryLocal(req.body as Parameters<typeof workingMemoryLocal>[0]);
+  });
+
+  app.post<{ Body: unknown }>('/engine/associate', async (req) => {
+    return await associateLocal(req.body as Parameters<typeof associateLocal>[0]);
+  });
+
+  app.post<{ Body: unknown }>('/engine/recall_episode', async (req) => {
+    return await recallEpisodeLocal(req.body as Parameters<typeof recallEpisodeLocal>[0]);
+  });
+
+  app.post<{ Body: unknown }>('/engine/consolidate', async (req) => {
+    return await consolidateLocal(req.body as Parameters<typeof consolidateLocal>[0]);
+  });
 
   // ─── Episode list ────────────────────────────────────────────────────────
   app.get<{ Querystring: { dbPath?: string; limit?: string } }>('/engine/episodes', async (req) => {
