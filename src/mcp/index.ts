@@ -27,10 +27,32 @@ fileLog('info', 'MCP process starting', { argv: process.argv, cwd: process.cwd()
 
 process.on('exit', (code) => fileLog('info', 'MCP process exit', { code }));
 process.on('beforeExit', (code) => fileLog('info', 'MCP process beforeExit', { code }));
-process.on('SIGTERM', () => fileLog('warn', 'SIGTERM received'));
-process.on('SIGINT', () => fileLog('warn', 'SIGINT received'));
-process.on('SIGHUP', () => fileLog('warn', 'SIGHUP received'));
-process.on('SIGPIPE', () => fileLog('warn', 'SIGPIPE received'));
+
+// CRITICAL: signal handlers must actually exit. Adding a handler at all
+// suppresses Node's default exit-on-signal behavior; if we only log, the
+// process becomes a zombie that keeps the Kuzu writer lock, port 4200, and
+// stdio FDs held forever. That's exactly what was happening across reloads
+// (multiple MCPs piling up, split-brain between port-holder and lock-holder).
+// The shutdown is intentionally synchronous + immediate — releasing Kuzu
+// cleanly via async cleanup risks Claude Code SIGKILL'ing us before we
+// finish. Better to drop the lock by exiting fast and let the next MCP take
+// it (Kuzu's stale-lock detection handles abrupt termination).
+process.on('SIGTERM', () => {
+  fileLog('warn', 'SIGTERM received — exiting');
+  process.exit(0);
+});
+process.on('SIGINT', () => {
+  fileLog('warn', 'SIGINT received — exiting');
+  process.exit(0);
+});
+// Also exit when Claude Code closes our stdin (the JSON-RPC channel ending
+// is the canonical "shutdown" signal for stdio MCP servers).
+process.stdin.on('end', () => {
+  fileLog('warn', 'stdin end — exiting');
+  process.exit(0);
+});
+process.on('SIGHUP', () => fileLog('warn', 'SIGHUP received (ignored)'));
+process.on('SIGPIPE', () => fileLog('warn', 'SIGPIPE received (ignored)'));
 process.on('uncaughtException', (err) => {
   fileLog('fatal', 'uncaughtException', { message: err.message, stack: err.stack });
 });
