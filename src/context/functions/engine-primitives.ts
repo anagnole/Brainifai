@@ -47,7 +47,14 @@ async function getActiveEngine(): Promise<GraphEngineInstance> {
 
 // ─── Local executors (run on the leader) ────────────────────────────────────
 
-interface WorkingMemoryInput { scope?: 'global' | 'here'; limit?: number }
+interface WorkingMemoryInput {
+  scope?: 'global' | 'here';
+  limit?: number;
+  /** Caller's cwd. Required for scope='here'. Followers inject this from
+   *  process.cwd() before forwarding so the leader uses the *follower's*
+   *  cwd, not its own. */
+  cwd?: string;
+}
 interface AssociateInput { cue: string; limit?: number }
 interface RecallEpisodeInput {
   cue?: string; from?: string; to?: string;
@@ -58,11 +65,18 @@ interface ConsolidateInput {
   kind?: string;
   salience?: 'low' | 'normal' | 'high';
   supersedes?: string | string[];
+  /** Caller's cwd. Stored on the new atom. Followers inject this from
+   *  process.cwd() before forwarding. */
+  cwd?: string;
 }
 
 export async function workingMemoryLocal(input: WorkingMemoryInput) {
   const engine = await getActiveEngine();
-  const atoms = await working_memory(engine, { scope: input.scope, limit: input.limit });
+  const atoms = await working_memory(engine, {
+    scope: input.scope,
+    limit: input.limit,
+    cwd: input.cwd,
+  });
   return { count: atoms.length, atoms: atoms.map(formatAtom) };
 }
 
@@ -100,6 +114,7 @@ export async function consolidateLocal(input: ConsolidateInput) {
       kind: input.kind,
       salience: input.salience,
       supersedes: input.supersedes,
+      cwd: input.cwd,
     });
     return {
       ok: true,
@@ -165,15 +180,25 @@ async function runLocal(endpoint: string, input: unknown): Promise<unknown> {
   }
 }
 
-/** Dispatcher used by ContextFunction.execute — picks local vs forward. */
+/** Dispatcher used by ContextFunction.execute — picks local vs forward.
+ *  When forwarding, injects the follower's cwd into the body (unless the
+ *  caller already provided one) so the leader records / filters by the
+ *  caller's working directory rather than its own. */
 async function dispatch<T>(
   endpoint: 'working_memory' | 'associate' | 'recall_episode' | 'consolidate',
   input: unknown,
 ): Promise<T> {
   if (getRole() === 'follower') {
-    return forwardToLeader<T>(endpoint, input);
+    const enriched = endpointNeedsCwd(endpoint)
+      ? { cwd: process.cwd(), ...(input as Record<string, unknown>) }
+      : input;
+    return forwardToLeader<T>(endpoint, enriched);
   }
   return runLocal(endpoint, input) as Promise<T>;
+}
+
+function endpointNeedsCwd(endpoint: string): boolean {
+  return endpoint === 'working_memory' || endpoint === 'consolidate';
 }
 
 // ─── working_memory ─────────────────────────────────────────────────────────
