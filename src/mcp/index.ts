@@ -1,3 +1,40 @@
+// ─── Diagnostic instrumentation (FIRST THING IN THE FILE) ───────────────────
+// Persistent post-mortem log at ~/.brainifai/logs/mcp-<pid>.log captures
+// every signal, exit code, uncaught exception, and unhandled rejection so
+// the next MCP "disappearance" leaves a record we can read.
+// Pure observation — does NOT change MCP behavior, only logs it.
+
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { homedir } from 'node:os';
+
+const MCP_LOG_DIR = resolve(homedir(), '.brainifai', 'logs');
+const MCP_LOG_FILE = resolve(MCP_LOG_DIR, `mcp-${process.pid}.log`);
+try { mkdirSync(MCP_LOG_DIR, { recursive: true }); } catch { /* ignore */ }
+
+function fileLog(level: string, msg: string, data?: unknown): void {
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    pid: process.pid,
+    level,
+    msg,
+    ...(data !== undefined ? { data } : {}),
+  }) + '\n';
+  try { appendFileSync(MCP_LOG_FILE, line); } catch { /* never block */ }
+}
+
+fileLog('info', 'MCP process starting', { argv: process.argv, cwd: process.cwd(), node: process.version });
+
+process.on('exit', (code) => fileLog('info', 'MCP process exit', { code }));
+process.on('beforeExit', (code) => fileLog('info', 'MCP process beforeExit', { code }));
+process.on('SIGTERM', () => fileLog('warn', 'SIGTERM received'));
+process.on('SIGINT', () => fileLog('warn', 'SIGINT received'));
+process.on('SIGHUP', () => fileLog('warn', 'SIGHUP received'));
+process.on('SIGPIPE', () => fileLog('warn', 'SIGPIPE received'));
+process.on('uncaughtException', (err) => {
+  fileLog('fatal', 'uncaughtException', { message: err.message, stack: err.stack });
+});
+
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createServer } from './server.js';
 import { resolveMcpContext } from './instance-context.js';
@@ -14,6 +51,9 @@ import type { FastifyInstance } from 'fastify';
 // Catch native Kuzu errors that can escape as unhandled rejections (e.g. lock contention).
 // Without this, Node.js v24+ crashes the process instead of allowing graceful recovery.
 process.on('unhandledRejection', (err) => {
+  fileLog('error', 'unhandledRejection', {
+    err: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
+  });
   logger.warn({ err }, 'MCP server: unhandled rejection (non-fatal)');
 });
 
@@ -63,10 +103,21 @@ async function main() {
 
   const server = await createServer(ctx);
   const transport = new StdioServerTransport();
+
+  // Diagnostic: log if the stdio transport closes (would mean Claude Code
+  // closed our stdin — i.e. voluntary disconnection on its side).
+  transport.onclose = () => fileLog('warn', 'StdioServerTransport closed (Claude Code closed stdin)');
+  // stdin EOF or error directly
+  process.stdin.on('close', () => fileLog('warn', 'process.stdin close'));
+  process.stdin.on('end', () => fileLog('warn', 'process.stdin end'));
+  process.stdin.on('error', (err) => fileLog('error', 'process.stdin error', { message: err.message }));
+  process.stdout.on('error', (err) => fileLog('error', 'process.stdout error (likely EPIPE)', { message: err.message }));
+
   await server.connect(transport);
 
   const instanceLabel = ctx ? `${ctx.instanceName} (${ctx.instanceType})` : 'global (default)';
   logger.info(`Brainifai MCP server started — instance: ${instanceLabel}`);
+  fileLog('info', 'MCP transport connected', { instance: instanceLabel });
 
   // Embed the viz API in the MCP process so the dashboard can read the engine
   // DB while MCP holds the Kuzu lock. Also doubles as our leader-election
